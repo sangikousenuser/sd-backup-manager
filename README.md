@@ -44,17 +44,30 @@ apps/cli               sd-backup（status / doctor / restore / export-logs ...�
 
 ## インストール（Ubuntu 26.04 / x86_64）
 
-デスクトップにログインした一般ユーザーで実行します（root では実行しません）。
+Ubuntu 側に Rust などの開発環境は不要です（GitHub Actions がビルドしたバイナリを配布しています）。
+次のどちらかを選んでください（両方は入れないでください）。
+
+**A. .deb パッケージ（おすすめ）** — 依存パッケージも apt が自動で入れます。
 
 ```bash
-curl -fsSLO https://github.com/sangikousenuser/sd-backup-manager/releases/latest/download/install.sh
-bash install.sh --version latest
+wget https://github.com/sangikousenuser/sd-backup-manager/releases/latest/download/sd-backup-manager_amd64.deb
+sudo apt install ./sd-backup-manager_amd64.deb
 ```
 
-バージョン指定: `bash install.sh --version v0.1.0`。インストーラは
+`/usr/bin` にインストールされ、全ユーザーのログイン時にデーモンと GUI が自動起動します。
+更新は新しい .deb を同じ手順で入れるだけ、削除は `sudo apt remove sd-backup-manager`
+（設定・DB・SSD の一時データ・NAS・パスワードは削除しません）。
+
+**B. 1 行インストール（ホームフォルダに入れる）**
+
+```bash
+curl -fsSL https://github.com/sangikousenuser/sd-backup-manager/releases/latest/download/install.sh | bash
+```
+
+バージョン指定は `... | bash -s -- --version v0.1.0`。インストーラは
 
 - 成果物と `SHA256SUMS` を照合（不一致なら中止）
-- 不足している依存パッケージ（udisks2, gvfs-backends, gvfs-fuse, gnome-keyring, fonts-noto-cjk ほか）を表示し、確認後に `sudo apt-get install`
+- 不足している依存パッケージ（udisks2, libglib2.0-bin, gvfs-backends, gvfs-fuse, gnome-keyring, fonts-noto-cjk ほか）を表示し、確認後に `sudo apt-get install`
 - `~/.local/bin` にバイナリ、`~/.config/systemd/user` にサービス、`~/.config/autostart` に GUI を登録
 - 更新時は既存の設定・DB を保持し、DB をバックアップしてから入れ替え
 

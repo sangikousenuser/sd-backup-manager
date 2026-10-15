@@ -84,12 +84,15 @@ jobs:
           su tester -c "export PATH=$PATH CARGO_HOME=${CARGO_HOME:-$HOME/.cargo} RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}; cd $GITHUB_WORKSPACE && cargo test --workspace --locked"
       - run: cargo build --release --workspace --locked
       - name: Package
-        run: scripts/package.sh "ci-${GITHUB_SHA::8}" target/release
+        run: |
+          scripts/package.sh "ci-${GITHUB_SHA::8}" target/release
+          scripts/package-deb.sh "ci-${GITHUB_SHA::8}" target/release
       - uses: actions/upload-artifact@v4
         with:
           name: sd-backup-manager-linux-x86_64
           path: |
             dist/*.tar.gz
+            dist/*.deb
             dist/SHA256SUMS
             dist/install.sh
           retention-days: 14

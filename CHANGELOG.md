@@ -11,4 +11,4 @@
 - manifest.json と「元の構成で復元」
 - 中断・再挿入・再起動からの復旧、永続カタログによる検証済み差分取り込み
 - Iced の日本語 GUI、CLI（status / doctor / restore / export-logs）
-- systemd ユーザーサービス、インストーラ（SHA256 照合）、GitHub Actions
+- systemd ユーザーサービス、.deb パッケージ（apt で依存も自動導入）、1 行インストーラ（SHA256 照合）、GitHub Actions

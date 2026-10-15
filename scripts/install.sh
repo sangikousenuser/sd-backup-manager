@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SD Backup Manager インストーラ（FR-039 / 12.2）
 #
-#   curl -fsSLO https://github.com/sangikousenuser/sd-backup-manager/releases/download/v0.1.0/install.sh
-#   bash install.sh --version v0.1.0
+#   curl -fsSL https://github.com/sangikousenuser/sd-backup-manager/releases/latest/download/install.sh | bash
+#   curl -fsSL https://github.com/sangikousenuser/sd-backup-manager/releases/latest/download/install.sh | bash -s -- --version v0.1.0
 #
 # - GitHub Release の成果物を取得し、SHA256 を照合してから展開する
 # - 一般ユーザー権限で ~/.local/bin に配置する（root での実行は拒否）
@@ -28,6 +28,7 @@ ICON_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
 # 実行時に必要な Ubuntu パッケージ
 DEPS=(
   udisks2            # メディアの検出・読み込み専用マウント・アンマウント
+  libglib2.0-bin     # gio コマンド（SMB のマウント）
   gvfs-backends      # SMB (smb://) バックエンド
   gvfs-fuse          # GVfs をファイルパスとして扱う
   gnome-keyring      # Secret Service（NAS パスワードの保管）
@@ -71,7 +72,13 @@ warn() { printf '\033[1;33m警告:\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31mエラー:\033[0m %s\n' "$*" >&2; exit 1; }
 confirm() {
   [ "$ASSUME_YES" = 1 ] && return 0
-  read -r -p "$1 [y/N] " ans
+  # `curl ... | bash` で実行された場合も端末から回答を読む
+  local ans=""
+  if [ -r /dev/tty ]; then
+    read -r -p "$1 [y/N] " ans < /dev/tty || ans=""
+  else
+    warn "対話できないため「いいえ」として扱います（--yes で確認を省略できます）"
+  fi
   [ "$ans" = "y" ] || [ "$ans" = "Y" ]
 }
 
@@ -88,6 +95,9 @@ if [ -r /etc/os-release ]; then
   fi
 fi
 command -v systemctl >/dev/null || die "systemd が見つかりません"
+if dpkg-query -W -f='${Status}' sd-backup-manager 2>/dev/null | grep -q "install ok installed"; then
+  die ".deb 版がインストール済みです。更新は新しい .deb を apt でインストールしてください"
+fi
 systemctl --user show-environment >/dev/null 2>&1 || die "systemd ユーザーセッションに接続できません（デスクトップにログインした状態で実行してください）"
 for c in curl sha256sum tar; do command -v "$c" >/dev/null || die "$c が必要です"; done
 
