@@ -1,0 +1,18 @@
+[package]
+name = "backup-ipc"
+description = "Typed JSON-lines protocol between daemon and GUI/CLI over a Unix socket"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+backup-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+nix.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

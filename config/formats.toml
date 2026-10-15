@@ -1,0 +1,65 @@
+# SD Backup Manager — カメラ形式定義（分類用）
+#
+# ここに無い拡張子のファイルも必ず Other/ に保存されます（取りこぼしはしません）。
+# 拡張子は小文字・ドットなしで記述します。
+# ~/.config/sd-backup-manager/formats.toml に置くとこのファイルの代わりに使われます。
+
+schema_version = 1
+
+# 静止画
+photo = [
+  "jpg", "jpeg", "jpe", "png", "tif", "tiff", "heic", "heif", "hif", "avif", "bmp", "gif", "webp",
+]
+
+# 静止画 RAW
+raw_photo = [
+  "arw", "srf", "sr2", "crw", "cr2", "cr3", "nef", "nrw", "raf", "rw2", "raw", "orf", "pef",
+  "ptx", "srw", "3fr", "fff", "iiq", "mos", "mef", "erf", "k25", "kdc", "mrw", "x3f", "rwl",
+  "gpr",
+]
+
+# 動画
+video = [
+  "mp4", "mov", "m4v", "mxf", "mts", "m2ts", "m2t", "mpg", "mpeg", "avi", "wmv", "3gp", "mkv",
+  "insv", "360", "lrf", "vob", "mod", "tod",
+]
+
+# RAW / 業務用動画
+raw_video = ["crm", "braw", "r3d", "ari", "cine", "mlv", "nev"]
+
+# 付随データ（同じ名前の写真/動画と同じカテゴリへ置く。判定できなければ Other）
+sidecar = [
+  "xmp", "xml", "srt", "thm", "cpi", "mpl", "mpls", "bdm", "bim", "json", "lrv", "aaf", "ale",
+  "cube", "smi", "ppn", "bin", "dat", "ind", "idx", "rtm", "rmd", "ctg", "lut", "txt", "log",
+]
+
+# 用途が曖昧な拡張子（DNG: 静止画 RAW または CinemaDNG 連番 / WAV: 独立音声または同時録音）
+ambiguous_dng = ["dng"]
+ambiguous_audio = ["wav", "bwf", "mp3", "m4a", "aac"]
+
+# 同一ディレクトリにこの数以上の DNG がある場合は CinemaDNG 動画シーケンスとみなす
+cinema_dng_min_sequence = 24
+
+# 既知の動画収録構造（大文字小文字非区別・パス先頭からの一致）。配下は全て Videos/ に置く。
+video_structures = [
+  "PRIVATE/M4ROOT",      # Sony XAVC S / XAVC HS
+  "PRIVATE/XDROOT",      # Sony XDCAM
+  "XDROOT",
+  "PRIVATE/AVCHD",       # AVCHD
+  "AVCHD",
+  "BDMV",
+  "PRIVATE/PANA_GRP",    # Panasonic
+  "CONTENTS/CLIPS001",   # Canon XF / Cinema RAW Light
+  "CONTENTS/VIDEO",      # Panasonic P2
+  "CONTENTS/CLIP",
+  "CONTENTS/AUDIO",
+  "CONTENTS/ICON",
+  "CONTENTS/PROXY",
+  "CONTENTS/VOICE",
+  "CLIP",                # Sony XDCAM (SxS)
+  "M4ROOT",
+  "MP_ROOT",             # Sony 旧 MP4
+]
+
+# RED (.RDM / .RDC) のようにディレクトリ名の拡張子で判定する動画構造
+video_directory_suffixes = ["rdm", "rdc"]

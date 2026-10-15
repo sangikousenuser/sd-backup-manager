@@ -1,0 +1,52 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/backup-core",
+    "crates/backup-storage",
+    "crates/backup-db",
+    "crates/backup-ipc",
+    "crates/backup-config",
+    "crates/backup-device",
+    "apps/daemon",
+    "apps/gui",
+    "apps/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/sangikousenuser/sd-backup-manager"
+rust-version = "1.88"
+
+[workspace.dependencies]
+backup-core = { path = "crates/backup-core" }
+backup-storage = { path = "crates/backup-storage" }
+backup-db = { path = "crates/backup-db" }
+backup-ipc = { path = "crates/backup-ipc" }
+backup-config = { path = "crates/backup-config" }
+backup-device = { path = "crates/backup-device" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "signal", "fs", "process"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+chrono-tz = "0.10"
+blake3 = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+unicode-normalization = "0.1"
+tempfile = "3"
+clap = { version = "4", features = ["derive"] }
+nix = { version = "0.31", features = ["fs", "user"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

@@ -1,0 +1,21 @@
+# インストーラが配置するファイル（install.sh / uninstall.sh が参照する一覧）
+[binaries]
+dir = "~/.local/bin"
+files = ["sd-backup-daemon", "sd-backup-gui", "sd-backup"]
+
+[systemd_user]
+dir = "~/.config/systemd/user"
+files = ["sd-backup-daemon.service"]
+
+[desktop]
+autostart = "~/.config/autostart/sd-backup-gui.desktop"
+application = "~/.local/share/applications/sd-backup-gui.desktop"
+icon = "~/.local/share/icons/hicolor/scalable/apps/sd-backup-manager.svg"
+
+# アンインストールしても残すもの（既定）
+[preserved]
+paths = [
+  "~/.config/sd-backup-manager",
+  "~/.local/share/sd-backup-manager",
+  "~/SDBackupStaging",
+]

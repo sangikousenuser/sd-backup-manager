@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  lint-test:
+    name: clippy + test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # 開発機 (macOS) と実機系 (Linux) の両方でロジックを検証する
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+
+  audit:
+    name: security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
+      - name: Lockfile is committed and in sync
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+  # Ubuntu 26.04 の GitHub-hosted runner の有無に依存しないよう、公式コンテナでビルドする
+  build-ubuntu-2604:
+    name: release build (Ubuntu 26.04 container)
+    runs-on: ubuntu-latest
+    needs: [fmt, lint-test]
+    container: ubuntu:26.04
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential curl ca-certificates pkg-config git
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ubuntu-2604
+      - name: Test on Ubuntu 26.04 (non-root, so permission tests run)
+        run: |
+          useradd -m tester
+          chown -R tester "$GITHUB_WORKSPACE"
+          chmod -R a+rwX "${CARGO_HOME:-$HOME/.cargo}" "${RUSTUP_HOME:-$HOME/.rustup}" || true
+          su tester -c "export PATH=$PATH CARGO_HOME=${CARGO_HOME:-$HOME/.cargo} RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}; cd $GITHUB_WORKSPACE && cargo test --workspace --locked"
+      - run: cargo build --release --workspace --locked
+      - name: Package
+        run: scripts/package.sh "ci-${GITHUB_SHA::8}" target/release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sd-backup-manager-linux-x86_64
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+            dist/install.sh
+          retention-days: 14

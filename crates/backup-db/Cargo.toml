@@ -1,0 +1,19 @@
+[package]
+name = "backup-db"
+description = "SQLite schema, migrations and queries"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+backup-core.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

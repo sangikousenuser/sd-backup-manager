@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=SD Backup Manager
+Name[ja]=SD バックアップ
+Comment=Copy camera cards to SSD and NAS safely
+Comment[ja]=撮影メディアを SSD 経由で NAS へ安全に取り込みます
+Exec=@BINDIR@/sd-backup-gui
+Icon=sd-backup-manager
+Terminal=false
+Categories=Utility;
+StartupNotify=true
+X-GNOME-Autostart-enabled=true

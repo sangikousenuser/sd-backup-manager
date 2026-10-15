@@ -1,0 +1,107 @@
+# SD Backup Manager
+
+文化祭・学園祭の撮影データを、SD カード / USB メモリ / 外付け SSD・HDD から
+**内蔵 SSD 経由で NAS に安全に取り込む** Ubuntu Desktop 向けアプリです（Rust / Iced）。
+
+担当者はメディアを挿すだけ。アプリが自動で
+
+1. メディアを検出し、**読み込み専用**で全パーティションを 1 セッションとして走査
+2. `Photos/` `Videos/` `Other/` に分類して内蔵 SSD にコピー（BLAKE3 で原本と照合）
+3. 全パーティションを安全にアンマウントできたら **「取り外し可能」** を表示（緑＝全件成功 / 黄＝失敗あり）
+4. 検証済みファイルから順に NAS（SMB）へ転送し、NAS 側も読み戻してハッシュ照合
+5. セッションの全ファイルと `manifest.json` が NAS で検証できたときだけ SSD の一時データを削除
+
+します。仕様は [docs/SD_Backup_Manager_Requirements_v1.0.md](docs/SD_Backup_Manager_Requirements_v1.0.md) を参照してください。
+
+![メイン画面（macOS 上でシミュレータを使って動作させた開発中の画面）](docs/images/main.png)
+
+## 絶対ルール（実装上の保証）
+
+| ルール | 実装 |
+|---|---|
+| 元メディアを変更しない | 読み込みは `O_NOFOLLOW` の読み取り専用オープンのみ。UDisks2 で `ro` マウント。書き込み・修復・フォーマットのコードパスなし |
+| NAS 検証前に SSD を消さない | 9.4 のガード条件をすべて満たすまで削除しない（`backup_core::policy::check_staging_deletion`） |
+| 取り外し可能はアンマウント成功時のみ | `SlotPhase::removable()` は `DoneGreen` / `DoneYellow` だけ。アンマウント失敗は赤表示 |
+| 未検証を成功扱いしない | `.part` → fsync → 読み戻しハッシュ → rename → 親 dir fsync の後に DB を更新 |
+| 履歴だけでスキップしない | 元ファイルの再ハッシュと NAS 実体の再ハッシュが一致した場合のみ参照扱い |
+| SSD 最低空き 20GB | セッション開始前の容量アドミッション + ファイル単位の確認 + 256MiB ごとの再確認 |
+
+## 構成
+
+```
+crates/backup-core     ドメイン（状態遷移・分類・識別・パス安全化・マニフェスト・容量/削除ポリシー）
+crates/backup-db       SQLite（WAL, synchronous=FULL）とマイグレーション
+crates/backup-storage  BLAKE3・原子的コピー・容量・ステージング・NAS 転送・復元
+crates/backup-device   UDisks2（Linux）/ メディアシミュレータ
+crates/backup-ipc      Unix ソケット上の JSON Lines プロトコル（同一 UID のみ）
+crates/backup-config   設定 TOML・XDG パス・Secret Service
+apps/daemon            sd-backup-daemon（systemd --user で常駐）
+apps/gui               sd-backup-gui（Iced・日本語）
+apps/cli               sd-backup（status / doctor / restore / export-logs ...）
+```
+
+詳しくは [docs/architecture.md](docs/architecture.md)。
+
+## インストール（Ubuntu 26.04 / x86_64）
+
+デスクトップにログインした一般ユーザーで実行します（root では実行しません）。
+
+```bash
+curl -fsSLO https://github.com/sangikousenuser/sd-backup-manager/releases/latest/download/install.sh
+bash install.sh --version latest
+```
+
+バージョン指定: `bash install.sh --version v0.1.0`。インストーラは
+
+- 成果物と `SHA256SUMS` を照合（不一致なら中止）
+- 不足している依存パッケージ（udisks2, gvfs-backends, gvfs-fuse, gnome-keyring, fonts-noto-cjk ほか）を表示し、確認後に `sudo apt-get install`
+- `~/.local/bin` にバイナリ、`~/.config/systemd/user` にサービス、`~/.config/autostart` に GUI を登録
+- 更新時は既存の設定・DB を保持し、DB をバックアップしてから入れ替え
+
+を行います。更新は `~/.local/share/sd-backup-manager/upgrade.sh v0.2.0`、
+削除は `~/.local/share/sd-backup-manager/uninstall.sh`（データ・SSD 一時ファイル・NAS・パスワードは消しません）。
+
+### 初回設定
+
+GUI の［設定］で NAS を設定します。
+
+1. 「SMB 共有」を選び、`smb://サーバー/共有名/フォルダ/`・ユーザー名・パスワードを入力
+2. ［接続テスト］→［保存］（保存時に保存先識別ファイルを作成して接続先を固定します）
+3. 管理者が CIFS を `/mnt/...` にマウント済みの場合は「マウント済みのパス」を選択
+
+パスワードは GNOME キーリング（Secret Service）に保存され、設定ファイル・ログ・コマンドライン引数には出ません。
+
+## 開発（macOS / Linux）
+
+```bash
+cargo test --workspace          # 単体テスト + E2E（シミュレータ + ローカル NAS）
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+実機の SD カードや NAS がなくても、シミュレータで GUI ごと動かせます。
+
+```bash
+export SDBM_BASE_DIR=/tmp/sdbm-dev   # 設定・DB・ソケット・SSD 一時領域をここにまとめる
+mkdir -p $SDBM_BASE_DIR/media $SDBM_BASE_DIR/nas
+cargo run -p sd-backup-daemon -- --base-dir $SDBM_BASE_DIR \
+  --simulate-media $SDBM_BASE_DIR/media --dev-nas-dir $SDBM_BASE_DIR/nas &
+cargo run -p sd-backup-gui
+# メディアの「挿入」: 中身を用意したディレクトリを media/ に移動
+mkdir -p /tmp/card/p1/DCIM/100MSDCF && echo test > /tmp/card/p1/DCIM/100MSDCF/DSC0001.JPG
+mv /tmp/card $SDBM_BASE_DIR/media/card1      # 抜去は media/card1 を移動/削除
+```
+
+シミュレータの書式は `crates/backup-device/src/sim.rs` を参照（`media.toml` で
+シリアル・FS UUID、`.unmount-fail` でアンマウント失敗を模擬できます）。
+
+## ドキュメント
+
+- [docs/architecture.md](docs/architecture.md) — 構成・状態遷移・データフロー
+- [docs/security.md](docs/security.md) — 権限・資格情報・パス安全化
+- [docs/operations.md](docs/operations.md) — 運用手順・トラブル対応・ログ
+- [docs/acceptance.md](docs/acceptance.md) — 受け入れ試験 AT-01〜34 の実施状況と実機試験手順
+- [CHANGELOG.md](CHANGELOG.md)
+
+## ライセンス
+
+MIT

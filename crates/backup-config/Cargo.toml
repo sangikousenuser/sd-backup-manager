@@ -1,0 +1,18 @@
+[package]
+name = "backup-config"
+description = "TOML settings, XDG paths, format definitions and Secret Service credentials"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+backup-core.workspace = true
+serde.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+keyring = "4"
+
+[dev-dependencies]
+tempfile.workspace = true

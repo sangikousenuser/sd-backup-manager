@@ -1,0 +1,20 @@
+[package]
+name = "sd-backup-gui"
+description = "SD Backup Manager GUI (Iced, Japanese)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "sd-backup-gui"
+path = "src/main.rs"
+
+[dependencies]
+backup-core.workspace = true
+backup-ipc.workspace = true
+backup-config.workspace = true
+iced = { version = "0.14", features = ["tokio"] }
+tokio.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true

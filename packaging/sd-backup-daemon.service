@@ -1,0 +1,21 @@
+# ~/.config/systemd/user/sd-backup-daemon.service
+# ログイン後に自動起動し、GUI を閉じても動作を続ける。ログアウト時は SIGTERM で
+# 安全に中断して状態を保存し、次回ログイン時に復旧する。
+[Unit]
+Description=SD Backup Manager background service
+Documentation=https://github.com/sangikousenuser/sd-backup-manager
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/sd-backup-daemon
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=yes
+PrivateTmp=no
+UMask=0077
+
+[Install]
+WantedBy=default.target
