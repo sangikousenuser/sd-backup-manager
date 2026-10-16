@@ -384,11 +384,22 @@ async fn doctor() {
         ("udisksctl", "udisks2（メディアのマウント/アンマウント）"),
         ("gio", "GVfs（SMB 接続）"),
         ("systemctl", "systemd ユーザーサービス"),
-        ("paplay", "通知音（pulseaudio-utils / pipewire-pulse）"),
         ("fc-match", "日本語フォント検出（fontconfig）"),
     ] {
         check(has_command(cmd), cmd, why);
     }
+    // GUI は paplay → pw-play → aplay の順に試す（Ubuntu 26.04 の既定は PipeWire）
+    let player = ["paplay", "pw-play", "aplay"]
+        .into_iter()
+        .find(|c| has_command(c));
+    check(
+        player.is_some(),
+        "通知音",
+        match player {
+            Some(p) => format!("{p} で再生"),
+            None => "再生コマンドがありません（pipewire-bin または pulseaudio-utils）".into(),
+        },
+    );
     let gvfs_fuse = std::path::Path::new("/usr/libexec/gvfsd-fuse").exists();
     check(
         gvfs_fuse,
@@ -461,10 +472,18 @@ async fn doctor() {
             if enabled { "有効" } else { "無効" },
         );
     }
-    let autostart = backup_config::home_dir().join(".config/autostart/sd-backup-gui.desktop");
+    // .deb 版は /etc/xdg/autostart、install.sh 版は ~/.config/autostart に登録する
+    let autostart = [
+        backup_config::home_dir().join(".config/autostart/sd-backup-gui.desktop"),
+        std::path::PathBuf::from("/etc/xdg/autostart/sd-backup-gui.desktop"),
+    ]
+    .into_iter()
+    .find(|p| p.exists());
     check(
-        autostart.exists(),
+        autostart.is_some(),
         "GUI 自動起動",
-        autostart.display().to_string(),
+        autostart
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "登録されていません".into()),
     );
 }
