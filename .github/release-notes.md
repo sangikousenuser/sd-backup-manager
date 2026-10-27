@@ -1,3 +1,13 @@
+## インストール（Windows 10 / 11 / x64）
+
+`sd-backup-manager-setup-x64.exe` をダウンロードして実行します（管理者権限・開発環境は不要）。
+署名のないアプリのため、SmartScreen が表示されたら「詳細情報」→「実行」を選んでください。
+インストール後に開く画面の［設定］で NAS を登録し、スタートメニューの「SD Backup Manager 診断」で確認します。
+自動再生（AutoPlay）はオフにしておくことをおすすめします。
+詳しくは [docs/windows.md](https://github.com/sangikousenuser/sd-backup-manager/blob/main/docs/windows.md)。
+
+インストーラを使わない場合は `sd-backup-manager-v*-x86_64-windows.zip` を展開して使えます。
+
 ## インストール（Ubuntu 26.04 / x86_64）
 
 Rust などの開発環境は不要です。次のどちらかを選んでください（両方は入れないでください）。
@@ -25,6 +35,6 @@ SHA256 を照合してから `~/.local/bin` に入れ、不足している依存
 
 ## 注意
 
-- このバージョンは Ubuntu 26.04 実機・実際の SD カード・SMB NAS での受け入れ試験がまだです。
+- このバージョンは Windows / Ubuntu 26.04 の実機・実際の SD カード・SMB NAS での受け入れ試験がまだです。
   本番の前に [docs/acceptance.md](https://github.com/sangikousenuser/sd-backup-manager/blob/main/docs/acceptance.md) の実機試験を行ってください。
 - 各ファイルのチェックサムは `SHA256SUMS` にあります。

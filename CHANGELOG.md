@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.2.0 — Windows 対応
+
+- Windows 10/11（x64）に対応。インストーラ（`sd-backup-manager-setup-x64.exe`、管理者権限不要）とポータブル zip を配布
+  - メディア検出: ドライブレターを走査し、USB / SD 接続のボリュームを物理ディスク単位でまとめる
+  - 取り外し: ボリュームのロック → ディスマウント（使用中なら「取り外し不可」）。抜かれるまでロックを保持
+  - 常駐: タスク スケジューラ（ログオン時起動・異常終了時は再起動）、GUI はスタートアップに登録
+  - NAS: `smb://` を UNC パスに変換し `WNetAddConnection2W` で接続。パスワードは資格情報マネージャー
+  - IPC: 名前付きパイプ、日本語フォント（メイリオ等）、通知音（PlaySound）
+- `sd-backup shutdown`（デーモンの正常停止）を追加
+- `sd-backup doctor`: PipeWire の通知音（pw-play）と .deb 版の自動起動（/etc/xdg/autostart）を正しく判定
+- 依存クレート ctutils を 0.4.6 に更新（RUSTSEC-2026-0385）
+- CI で Windows の clippy・テスト・インストーラ作成を実行
+- 引き継ぎ資料 `docs/HANDOFF.md`・`CLAUDE.md`、Windows 版の説明 `docs/windows.md` を追加
+
 ## v0.1.0 — 初回リリース
 
 - メディア自動検出（UDisks2）・読み込み専用マウント・全パーティションを 1 セッションに集約
