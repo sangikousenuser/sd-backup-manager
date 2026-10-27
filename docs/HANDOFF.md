@@ -12,7 +12,7 @@ Windows での読み替えは [windows.md](windows.md)）。
 | 項目 | 状態 |
 |---|---|
 | Linux（Ubuntu 26.04）版 | v0.1.0 をリリース済み（.deb / tar.gz / install.sh）。実機にインストールし、デーモン起動と `doctor` まで確認済み。SD カード・NAS での受け入れ試験は未実施 |
-| Windows 版 | `windows-port` ブランチで移植（このドキュメント作成時点）。GitHub Actions の windows-latest で clippy・単体テスト・E2E（シミュレータ）・インストーラ作成を実行。**Windows 実機での動作確認は未実施** |
+| Windows 版 | main に統合済み（未リリース。次のタグで Setup.exe が Releases に載る）。GitHub Actions の windows-latest で clippy・単体テスト・E2E（シミュレータ）・Setup.exe 作成まで成功。CI の成果物 `sd-backup-manager-windows-x64` からも Setup.exe を取得できる。**Windows 実機での動作確認は未実施** |
 | macOS | 開発用。シミュレータでのみ動作（実機メディアは扱わない） |
 | CI | `.github/workflows/ci.yml`: fmt / clippy + test（Linux・macOS・Windows）/ cargo audit / Ubuntu 26.04 コンテナでのリリースビルド / Windows リリースビルド（zip + Setup.exe） |
 | リリース | `v*` タグの push で `.github/workflows/release.yml` が Linux（.deb, tar.gz）と Windows（Setup.exe, zip）を GitHub Releases に公開 |
