@@ -529,7 +529,7 @@ fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
         f.sync_all()?;
     }
     std::fs::rename(&tmp, path)?;
-    std::fs::File::open(dir)?.sync_all()?;
+    backup_storage::platform::sync_dir(dir)?;
     Ok(())
 }
 

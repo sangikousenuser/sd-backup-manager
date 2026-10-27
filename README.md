@@ -1,7 +1,8 @@
 # SD Backup Manager
 
 文化祭・学園祭の撮影データを、SD カード / USB メモリ / 外付け SSD・HDD から
-**内蔵 SSD 経由で NAS に安全に取り込む** Ubuntu Desktop 向けアプリです（Rust / Iced）。
+**内蔵 SSD 経由で NAS に安全に取り込む** アプリです（Rust / Iced）。
+**Windows 10/11（x64）** と **Ubuntu 26.04** に対応しています（Windows での読み替えは [docs/windows.md](docs/windows.md)）。
 
 担当者はメディアを挿すだけ。アプリが自動で
 
@@ -32,15 +33,21 @@
 crates/backup-core     ドメイン（状態遷移・分類・識別・パス安全化・マニフェスト・容量/削除ポリシー）
 crates/backup-db       SQLite（WAL, synchronous=FULL）とマイグレーション
 crates/backup-storage  BLAKE3・原子的コピー・容量・ステージング・NAS 転送・復元
-crates/backup-device   UDisks2（Linux）/ メディアシミュレータ
-crates/backup-ipc      Unix ソケット上の JSON Lines プロトコル（同一 UID のみ）
-crates/backup-config   設定 TOML・XDG パス・Secret Service
-apps/daemon            sd-backup-daemon（systemd --user で常駐）
+crates/backup-device   UDisks2（Linux）/ Win32（Windows）/ メディアシミュレータ
+crates/backup-ipc      JSON Lines プロトコル（Unix ソケット / Windows 名前付きパイプ）
+crates/backup-config   設定 TOML・パス（XDG / %APPDATA%）・資格情報（Secret Service / 資格情報マネージャー）
+apps/daemon            sd-backup-daemon（Linux: systemd --user、Windows: タスク スケジューラで常駐）
 apps/gui               sd-backup-gui（Iced・日本語）
 apps/cli               sd-backup（status / doctor / restore / export-logs ...）
 ```
 
 詳しくは [docs/architecture.md](docs/architecture.md)。
+
+## インストール（Windows 10/11 / x64）
+
+[Releases](https://github.com/sangikousenuser/sd-backup-manager/releases/latest) から
+`sd-backup-manager-setup-x64.exe` をダウンロードして実行します（管理者権限・開発環境は不要）。
+インストール後に開く画面の［設定］で NAS を登録してください。詳しくは [docs/windows.md](docs/windows.md)。
 
 ## インストール（Ubuntu 26.04 / x86_64）
 
@@ -109,6 +116,8 @@ mv /tmp/card $SDBM_BASE_DIR/media/card1      # 抜去は media/card1 を移動/�
 
 ## ドキュメント
 
+- [docs/HANDOFF.md](docs/HANDOFF.md) — **引き継ぎ資料**（現状・構成・Windows での開発手順・未検証事項・次の作業）
+- [docs/windows.md](docs/windows.md) — Windows 版（仕様の読み替え・インストール・注意点）
 - [docs/architecture.md](docs/architecture.md) — 構成・状態遷移・データフロー
 - [docs/security.md](docs/security.md) — 権限・資格情報・パス安全化
 - [docs/operations.md](docs/operations.md) — 運用手順・トラブル対応・ログ

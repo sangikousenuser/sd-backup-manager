@@ -45,6 +45,13 @@
 | AT-33 | 空き容量取得失敗 | 実装 + 単体 | GUI は「取得不可」表示、アドミッションは開始しない（`Admission::Unknown`） |
 | AT-34 | 既知/未知形式 | 単体 + E2E | 未知拡張子は Other/ に保存 |
 
+## Windows での状況
+
+E2E（シミュレータ）と単体テストは GitHub Actions の windows-latest でも実行している（途中抜去の
+E2E と読み込み不可ファイルの E2E は Windows では模擬できないため Unix のみ）。上表の「実機未検証」に
+加えて、Windows では **メディア検出・ロック/ディスマウント・抜去検出・SMB 接続・タスク スケジューラ・
+インストーラのすべてが実機未検証**。確認項目は [HANDOFF.md](HANDOFF.md) の 5 章。
+
 ## 実機試験の手順（Ubuntu 26.04）
 
 1. `bash install.sh --version <tag>` → `sd-backup doctor` が全て ✔。

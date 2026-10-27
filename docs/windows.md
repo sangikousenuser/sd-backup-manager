@@ -1,0 +1,54 @@
+# Windows 版
+
+SD Backup Manager は Windows 10 / 11（x64）でも動作します。仕様書（Ubuntu 前提）の各要素は
+次のように Windows の仕組みに置き換えています。安全ルール（元メディアを変更しない・NAS 検証前に
+SSD を消さない・アンマウント成功時だけ「取り外し可能」など）は Linux 版と同じコードで守られます。
+
+| 仕様書（Ubuntu） | Windows 版 | 実装 |
+|---|---|---|
+| udev / UDisks2 で検出 | ドライブレターを 1 秒ごとに走査し、USB / SD(MMC) 接続またはリムーバブルのボリュームを物理ディスク単位でまとめる | `crates/backup-device/src/windows.rs` |
+| UDisks2 で読み込み専用マウント | Windows の自動マウントをそのまま使い、アプリは読み込み専用でしか開かない（リパースポイントは辿らない） | `crates/backup-storage/src/platform.rs` |
+| UDisks2 でアンマウント | 各ボリュームを `FSCTL_LOCK_VOLUME` → `FSCTL_DISMOUNT_VOLUME`。使用中ならロックできず失敗＝「取り外し不可」。ロックは抜かれるまで保持 | `windows.rs` の `lock_and_dismount` |
+| 抜去の検出 | 物理ドライブが消える、または `IOCTL_STORAGE_CHECK_VERIFY2` でメディアなし | `windows.rs` の `media_present` |
+| systemd --user | タスク スケジューラ（ログオン時に起動、異常終了時は 1 分後に再起動） | `packaging/windows/register-task.ps1` |
+| XDG autostart | `HKCU\...\Run` の `SDBackupManagerGUI` | `packaging/windows/installer.iss` |
+| Secret Service | Windows 資格情報マネージャー（keyring クレート） | `crates/backup-config/src/secrets.rs` |
+| GVfs で SMB | `smb://server/share/sub` を `\\server\share\sub` に変換し、`WNetAddConnection2W` で接続（ドライブレターなし） | `apps/daemon/src/nas_backend.rs` |
+| CIFS マウントパス | 割り当て済みドライブ（`Z:\...`）または UNC パス。OS ドライブ・SSD と別ボリュームであることを確認 | 同上 |
+| Unix ソケット（0600 + peer UID） | 名前付きパイプ `\\.\pipe\sd-backup-manager-<id>`（リモート拒否・同名パイプの先取り検出） | `crates/backup-ipc/src/transport.rs` |
+| `~/.config`・`~/.local/share` | `%APPDATA%\sd-backup-manager`（設定）・`%LOCALAPPDATA%\sd-backup-manager`（DB・ログ） | `crates/backup-config/src/lib.rs` |
+| SSD 一時保存 `~/SDBackupStaging` | `%USERPROFILE%\SDBackupStaging` | 同上 |
+| paplay | `PlaySoundW` | `apps/gui/src/sound.rs` |
+| Noto Sans CJK | メイリオ → 游ゴシック → MS ゴシック | `apps/gui/src/fonts.rs` |
+
+## インストール
+
+1. [Releases](https://github.com/sangikousenuser/sd-backup-manager/releases/latest) から
+   `sd-backup-manager-setup-x64.exe` をダウンロードして実行します（管理者権限は不要）。
+   - 署名のないアプリのため、SmartScreen が表示されたら「詳細情報」→「実行」を選びます。
+2. インストールが終わると GUI が開きます。［設定］で NAS（`smb://サーバー/共有名/フォルダ/`、
+   ユーザー名、パスワード）を入力し、［接続テスト］→［保存］します。
+3. スタートメニューの「SD Backup Manager 診断」で、すべて ✔ になることを確認します。
+
+インストール先は `%LOCALAPPDATA%\Programs\SD Backup Manager`。次回ログオンからはデーモン
+（タスク スケジューラ）と GUI（スタートアップ）が自動で起動します。
+
+アンインストールは「設定 → アプリ」から。設定・履歴・SSD の一時保存は削除しません。
+
+## 運用上の注意（Windows 固有）
+
+- **自動再生（AutoPlay）をオフに**: カードを挿したときにエクスプローラーや写真アプリが開くと、
+  ファイルを開いたままになり「使用中」で取り外し可能にならないことがあります。
+  「設定 → Bluetooth とデバイス → 自動再生」でオフにしてください。
+- **取り外し可能の表示後**: ボリュームはロックされた状態になります（他のアプリから見えなくなります）。
+  そのまま抜いてください。タスクトレイの「安全に取り外す」は不要です。
+- **USB の外付け HDD/SSD**: ロックとディスマウントでデータは確定しますが、ドライブ自体の
+  電源停止（「安全に取り外す」相当）は行いません。抜く前にアクセスランプが消えていることを確認してください。
+- **ログオフ・シャットダウン**: 常駐プロセスは Windows に強制終了されることがありますが、
+  次回起動時の復旧処理で中断したコピーから安全にやり直します（未検証ファイルを成功扱いしません）。
+- **コマンド**: `"%LOCALAPPDATA%\Programs\SD Backup Manager\sd-backup.exe" status` などで状態を確認できます
+  （`doctor`・`sessions`・`retry-nas`・`export-logs`・`restore`・`shutdown`）。
+
+## 開発
+
+[docs/HANDOFF.md](HANDOFF.md) の「Windows での開発」を参照してください。
