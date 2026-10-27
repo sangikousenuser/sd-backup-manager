@@ -159,7 +159,15 @@ fn find_files(root: &Path) -> Vec<String> {
             if e.file_type().unwrap().is_dir() {
                 stack.push(e.path());
             } else {
-                out.push(e.path().strip_prefix(root).unwrap().display().to_string());
+                // Windows の区切り文字 `\\` を `/` にそろえて比較する
+                out.push(
+                    e.path()
+                        .strip_prefix(root)
+                        .unwrap()
+                        .display()
+                        .to_string()
+                        .replace('\\', "/"),
+                );
             }
         }
     }
