@@ -25,7 +25,11 @@ fn env() -> Env {
     // macOS の Unix ソケットパス長制限を避けるため短いパスを使う
     let dir = tempfile::Builder::new()
         .prefix("sdbm")
-        .tempdir_in("/tmp")
+        .tempdir_in(if cfg!(unix) {
+            std::path::PathBuf::from("/tmp")
+        } else {
+            std::env::temp_dir()
+        })
         .unwrap();
     let base = dir.path().to_path_buf();
     let media = base.join("media");
@@ -53,6 +57,31 @@ fn options(e: &Env, overrides: Overrides) -> DaemonOptions {
             stable_for: Duration::from_millis(200),
         }),
     }
+}
+
+/// Windows ではウォッチャーがフォルダを列挙している瞬間に名前変更・削除が失敗することがあるため再試行する。
+fn rename_retry(from: impl AsRef<Path>, to: impl AsRef<Path>) -> std::io::Result<()> {
+    let mut last = None;
+    for _ in 0..100 {
+        match fs::rename(from.as_ref(), to.as_ref()) {
+            Ok(()) => return Ok(()),
+            Err(e) => last = Some(e),
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err(last.unwrap())
+}
+
+fn remove_retry(p: impl AsRef<Path>) -> std::io::Result<()> {
+    let mut last = None;
+    for _ in 0..100 {
+        match fs::remove_dir_all(p.as_ref()) {
+            Ok(()) => return Ok(()),
+            Err(e) => last = Some(e),
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err(last.unwrap())
 }
 
 fn write(p: &Path, data: &[u8]) {
@@ -84,7 +113,7 @@ fn make_card(media_root: &Path, name: &str) -> PathBuf {
     write(&card.join("p2/DATA/notes.xyz"), b"unknown format");
     // 準備ができてから一度に「挿入」する
     let final_path = media_root.join(name);
-    fs::rename(&card, &final_path).unwrap();
+    rename_retry(&card, &final_path).unwrap();
     final_path
 }
 
@@ -252,7 +281,7 @@ async fn happy_path_copies_verifies_transfers_and_cleans_up() {
     );
 
     // 抜去でスロットが空く
-    fs::remove_dir_all(e.media.join("cardA")).unwrap();
+    remove_retry(e.media.join("cardA")).unwrap();
     wait_until("slot freed", Duration::from_secs(10), || {
         slot_phase(&shared, 0).is_none()
     })
@@ -297,7 +326,7 @@ async fn nas_offline_keeps_staging_and_reinsert_after_completion_creates_new_fol
     shutdown(shared, token).await;
 
     // NAS が復帰した状態でデーモンを再起動 → 転送されて完了
-    fs::rename(e.base.join("nas"), &offline_nas).unwrap();
+    rename_retry(e.base.join("nas"), &offline_nas).unwrap();
     let token = CancellationToken::new();
     let shared = start(
         options(
@@ -320,7 +349,7 @@ async fn nas_offline_keeps_staging_and_reinsert_after_completion_creates_new_fol
     let folder1 = shared.db().get_session(&sid).unwrap().unwrap().folder_name;
 
     // 正常終了後、同じカードに新しい撮影データを追加して再挿入（AT-11）
-    fs::rename(e.media.join("cardB"), e.base.join("cardB-out")).unwrap();
+    rename_retry(e.media.join("cardB"), e.base.join("cardB-out")).unwrap();
     wait_until("slot freed", Duration::from_secs(10), || {
         slot_phase(&shared, 0).is_none()
     })
@@ -332,7 +361,7 @@ async fn nas_offline_keeps_staging_and_reinsert_after_completion_creates_new_fol
     // 同じパス・同じサイズのまま内容だけ上書き（AT-12: 偽スキップしない）
     write(&e.base.join("cardB-out/p1/README.TXT"), b"HELLO");
     tokio::time::sleep(Duration::from_millis(1100)).await; // 同一秒のフォルダ名を避ける必要はないが時刻を進める
-    fs::rename(e.base.join("cardB-out"), e.media.join("cardB")).unwrap();
+    rename_retry(e.base.join("cardB-out"), e.media.join("cardB")).unwrap();
     wait_until("second session green", Duration::from_secs(20), || {
         slot_phase(&shared, 0) == Some(SlotPhase::DoneGreen)
             && session_of_slot(&shared, 0).as_deref() != Some(sid.as_str())
@@ -395,6 +424,8 @@ async fn nas_offline_keeps_staging_and_reinsert_after_completion_creates_new_fol
     shutdown(shared, token).await;
 }
 
+// Windows ではファイル権限で読み込み失敗を作れないため Unix のみ
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unreadable_file_turns_yellow_and_blocks_cleanup() {
     use std::os::unix::fs::PermissionsExt;
@@ -423,7 +454,7 @@ async fn unreadable_file_turns_yellow_and_blocks_cleanup() {
         fs::Permissions::from_mode(0o000),
     )
     .unwrap();
-    fs::rename(&card, e.media.join("cardC")).unwrap();
+    rename_retry(&card, e.media.join("cardC")).unwrap();
 
     wait_until("yellow", Duration::from_secs(20), || {
         slot_phase(&shared, 0) == Some(SlotPhase::DoneYellow)
@@ -490,7 +521,7 @@ async fn unmount_failure_is_never_removable() {
     let card = e.base.join(".cardD");
     write(&card.join("p1/A.JPG"), b"a");
     write(&card.join(".unmount-fail"), b"");
-    fs::rename(&card, e.media.join("cardD")).unwrap();
+    rename_retry(&card, e.media.join("cardD")).unwrap();
     wait_until("unmount failed", Duration::from_secs(20), || {
         slot_phase(&shared, 0) == Some(SlotPhase::UnmountFailed)
     })
@@ -507,6 +538,9 @@ async fn unmount_failure_is_never_removable() {
     shutdown(shared, token).await;
 }
 
+// Windows では開いているファイルを含むフォルダの名前を変更できず、この方法では
+// 途中抜去を模擬できないため Unix のみ（Windows は実機試験で確認する）
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn removal_mid_copy_then_reinsert_resumes_same_session() {
     let e = env();
@@ -526,7 +560,7 @@ async fn removal_mid_copy_then_reinsert_resumes_same_session() {
         &card.join("media.toml"),
         b"serial = \"E1\"\nfs_uuid = \"EEEE\"\n",
     );
-    fs::rename(&card, e.media.join("cardE")).unwrap();
+    rename_retry(&card, e.media.join("cardE")).unwrap();
     wait_until("copying", Duration::from_secs(20), || {
         shared.rt().slots[0]
             .as_ref()
@@ -535,7 +569,7 @@ async fn removal_mid_copy_then_reinsert_resumes_same_session() {
     .await;
     let sid = session_of_slot(&shared, 0).unwrap();
     let folder = shared.db().get_session(&sid).unwrap().unwrap().folder_name;
-    fs::rename(e.media.join("cardE"), e.base.join("cardE-out")).unwrap();
+    rename_retry(e.media.join("cardE"), e.base.join("cardE-out")).unwrap();
     wait_until("interrupted state", Duration::from_secs(20), || {
         session_state(&shared, &sid) == SessionState::SourceInterrupted
     })
@@ -547,7 +581,7 @@ async fn removal_mid_copy_then_reinsert_resumes_same_session() {
     let partial = shared.db().get_session(&sid).unwrap().unwrap();
     assert!(partial.completed_files < 40, "not falsely complete");
 
-    fs::rename(e.base.join("cardE-out"), e.media.join("cardE")).unwrap();
+    rename_retry(e.base.join("cardE-out"), e.media.join("cardE")).unwrap();
     wait_until("resumed green", Duration::from_secs(60), || {
         slot_phase(&shared, 0) == Some(SlotPhase::DoneGreen)
     })
@@ -588,7 +622,7 @@ async fn capacity_wait_blocks_start_and_third_media_waits() {
             &card.join("media.toml"),
             format!("serial = \"{name}\"\n").as_bytes(),
         );
-        fs::rename(&card, e.media.join(name)).unwrap();
+        rename_retry(&card, e.media.join(name)).unwrap();
     }
     wait_until(
         "two capacity waits and one queued",
@@ -626,7 +660,7 @@ async fn cloned_identity_is_ambiguous_and_never_merged() {
             &card.join("media.toml"),
             b"serial = \"SAME\"\nmodel = \"Clone\"\nfs_uuid = \"DUP\"\n",
         );
-        fs::rename(&card, e.media.join(name)).unwrap();
+        rename_retry(&card, e.media.join(name)).unwrap();
     }
     wait_until("both done", Duration::from_secs(20), || {
         let rt = shared.rt();

@@ -8,6 +8,8 @@
 pub mod sim;
 #[cfg(target_os = "linux")]
 pub mod udisks;
+#[cfg(windows)]
+pub mod windows;
 
 use backup_core::identity::MediaDescriptor;
 use std::path::PathBuf;
@@ -77,6 +79,8 @@ pub enum DeviceBackend {
     Simulated(sim::SimBackend),
     #[cfg(target_os = "linux")]
     UDisks(udisks::UDisksBackend),
+    #[cfg(windows)]
+    Windows(windows::WinBackend),
 }
 
 impl DeviceBackend {
@@ -85,6 +89,8 @@ impl DeviceBackend {
             DeviceBackend::Simulated(_) => "simulator",
             #[cfg(target_os = "linux")]
             DeviceBackend::UDisks(_) => "udisks2",
+            #[cfg(windows)]
+            DeviceBackend::Windows(_) => "win32",
         }
     }
 
@@ -98,6 +104,8 @@ impl DeviceBackend {
             DeviceBackend::Simulated(b) => b.clone().spawn_watcher(tx, opts),
             #[cfg(target_os = "linux")]
             DeviceBackend::UDisks(b) => b.clone().spawn_watcher(tx, opts),
+            #[cfg(windows)]
+            DeviceBackend::Windows(b) => b.clone().spawn_watcher(tx, opts),
         }
     }
 
@@ -107,6 +115,8 @@ impl DeviceBackend {
             DeviceBackend::Simulated(b) => b.prepare(media),
             #[cfg(target_os = "linux")]
             DeviceBackend::UDisks(b) => b.prepare(media).await,
+            #[cfg(windows)]
+            DeviceBackend::Windows(b) => b.prepare(media),
         }
     }
 
@@ -116,6 +126,8 @@ impl DeviceBackend {
             DeviceBackend::Simulated(b) => b.unmount_all(media),
             #[cfg(target_os = "linux")]
             DeviceBackend::UDisks(b) => b.unmount_all(media).await,
+            #[cfg(windows)]
+            DeviceBackend::Windows(b) => b.unmount_all(media).await,
         }
     }
 
@@ -125,6 +137,8 @@ impl DeviceBackend {
             DeviceBackend::Simulated(b) => b.is_present(device_key),
             #[cfg(target_os = "linux")]
             DeviceBackend::UDisks(b) => b.is_present(device_key).await,
+            #[cfg(windows)]
+            DeviceBackend::Windows(b) => b.is_present(device_key).await,
         }
     }
 }

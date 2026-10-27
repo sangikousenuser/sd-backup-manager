@@ -45,6 +45,8 @@ enum Cmd {
     },
     /// NAS 転送を今すぐ再試行
     RetryNas,
+    /// デーモンを正常停止（処理中のコピーは安全に中断され、次回起動時に再開）
+    Shutdown,
     /// 処理を一時停止
     Pause,
     /// 処理を再開
@@ -235,6 +237,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Cmd::RetryNas => print_ok(daemon(Command::RetryNas).await?),
+        Cmd::Shutdown => print_ok(daemon(Command::Shutdown).await?),
         Cmd::Pause => print_ok(daemon(Command::Pause).await?),
         Cmd::Resume => print_ok(daemon(Command::Resume).await?),
         Cmd::ExportLogs { dest_dir } => {
@@ -346,6 +349,7 @@ fn check(ok: bool, label: &str, detail: impl AsRef<str>) {
     );
 }
 
+#[cfg(not(windows))]
 fn has_command(cmd: &str) -> bool {
     std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).any(|d| d.join(cmd).is_file()))
@@ -354,6 +358,64 @@ fn has_command(cmd: &str) -> bool {
 
 async fn doctor() {
     let paths = AppPaths::from_env();
+    env_checks();
+
+    match Config::load(&paths.config_file()) {
+        Ok(cfg) => {
+            check(true, "設定", paths.config_file().display().to_string());
+            let staging = cfg.staging_path();
+            match backup_storage::capacity::fs_space(&staging) {
+                Ok(s) => check(
+                    s.free_bytes > cfg.reserve_free_bytes,
+                    "SSD 空き容量",
+                    format!(
+                        "{} / {}（最低確保 {}）",
+                        format_bytes(s.free_bytes),
+                        format_bytes(s.total_bytes),
+                        format_bytes(cfg.reserve_free_bytes)
+                    ),
+                ),
+                Err(e) => check(false, "SSD 空き容量", format!("{}: {e}", staging.display())),
+            }
+            let symlink = std::fs::symlink_metadata(&staging)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
+            check(
+                !symlink,
+                "ステージングフォルダ",
+                if symlink {
+                    "シンボリックリンクは使用できません".to_string()
+                } else {
+                    staging.display().to_string()
+                },
+            );
+            check(
+                cfg.nas.mode != backup_config::NasMode::Disabled,
+                "NAS 設定",
+                cfg.nas.display_target(),
+            );
+            check(
+                !cfg.nas.target_id.is_empty() || cfg.nas.mode == backup_config::NasMode::Disabled,
+                "NAS 保存先の初期化",
+                if cfg.nas.target_id.is_empty() {
+                    "未初期化"
+                } else {
+                    "済み"
+                },
+            );
+        }
+        Err(e) => check(false, "設定", e.to_string()),
+    }
+    match daemon(Command::GetState).await {
+        Ok(_) => check(true, "デーモン", paths.socket_path().display().to_string()),
+        Err(e) => check(false, "デーモン", e.to_string()),
+    }
+    autostart_checks();
+}
+
+/// OS 固有の依存関係（Linux/macOS）。
+#[cfg(not(windows))]
+fn env_checks() {
     if let Ok(text) = std::fs::read_to_string("/etc/os-release") {
         let pretty = text
             .lines()
@@ -410,57 +472,10 @@ async fn doctor() {
             "なし（GVfs の SMB をファイルとして扱うのに必要）"
         },
     );
+}
 
-    match Config::load(&paths.config_file()) {
-        Ok(cfg) => {
-            check(true, "設定", paths.config_file().display().to_string());
-            let staging = cfg.staging_path();
-            match backup_storage::capacity::fs_space(&staging) {
-                Ok(s) => check(
-                    s.free_bytes > cfg.reserve_free_bytes,
-                    "SSD 空き容量",
-                    format!(
-                        "{} / {}（最低確保 {}）",
-                        format_bytes(s.free_bytes),
-                        format_bytes(s.total_bytes),
-                        format_bytes(cfg.reserve_free_bytes)
-                    ),
-                ),
-                Err(e) => check(false, "SSD 空き容量", format!("{}: {e}", staging.display())),
-            }
-            let symlink = std::fs::symlink_metadata(&staging)
-                .map(|m| m.file_type().is_symlink())
-                .unwrap_or(false);
-            check(
-                !symlink,
-                "ステージングフォルダ",
-                if symlink {
-                    "シンボリックリンクは使用できません".to_string()
-                } else {
-                    staging.display().to_string()
-                },
-            );
-            check(
-                cfg.nas.mode != backup_config::NasMode::Disabled,
-                "NAS 設定",
-                cfg.nas.display_target(),
-            );
-            check(
-                !cfg.nas.target_id.is_empty() || cfg.nas.mode == backup_config::NasMode::Disabled,
-                "NAS 保存先の初期化",
-                if cfg.nas.target_id.is_empty() {
-                    "未初期化"
-                } else {
-                    "済み"
-                },
-            );
-        }
-        Err(e) => check(false, "設定", e.to_string()),
-    }
-    match daemon(Command::GetState).await {
-        Ok(_) => check(true, "デーモン", paths.socket_path().display().to_string()),
-        Err(e) => check(false, "デーモン", e.to_string()),
-    }
+#[cfg(not(windows))]
+fn autostart_checks() {
     if has_command("systemctl") {
         let out = std::process::Command::new("systemctl")
             .args(["--user", "is-enabled", "sd-backup-daemon.service"])
@@ -487,3 +502,61 @@ async fn doctor() {
             .unwrap_or_else(|| "登録されていません".into()),
     );
 }
+
+/// OS 固有の依存関係（Windows）。
+#[cfg(windows)]
+fn env_checks() {
+    check(true, "OS", format!("Windows ({})", std::env::consts::ARCH));
+    let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let font = ["meiryo.ttc", "YuGothM.ttc", "msgothic.ttc"]
+        .iter()
+        .map(|f| std::path::Path::new(&windir).join("Fonts").join(f))
+        .find(|p| p.exists());
+    check(
+        font.is_some(),
+        "日本語フォント",
+        font.map(|p| p.display().to_string())
+            .unwrap_or_else(|| "見つかりません（設定 → 言語で日本語の補助フォントを追加）".into()),
+    );
+    let creds = backup_config::secrets::load_password("doctor-probe").is_ok();
+    check(
+        creds,
+        "資格情報マネージャー",
+        if creds {
+            "利用可能"
+        } else {
+            "利用できません"
+        },
+    );
+}
+
+#[cfg(windows)]
+fn autostart_checks() {
+    let task = std::process::Command::new("schtasks")
+        .args(["/Query", "/TN", WINDOWS_TASK_NAME])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    check(
+        task,
+        "自動起動（タスク スケジューラ）",
+        if task { "登録済み" } else { "未登録" },
+    );
+    let run = std::process::Command::new("reg")
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+            "/v",
+            WINDOWS_GUI_RUN_VALUE,
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    check(run, "GUI 自動起動", if run { "登録済み" } else { "未登録" });
+}
+
+/// インストーラ（packaging/windows）と同じ名前。
+#[cfg(windows)]
+const WINDOWS_TASK_NAME: &str = "SD Backup Manager Daemon";
+#[cfg(windows)]
+const WINDOWS_GUI_RUN_VALUE: &str = "SDBackupManagerGUI";

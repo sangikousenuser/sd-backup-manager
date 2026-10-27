@@ -85,7 +85,7 @@ pub async fn start(
     );
     recovery::recover(&shared)?;
 
-    let listener = backup_ipc::auth::bind_socket(&paths.socket_path())
+    let listener = backup_ipc::transport::Listener::bind(&paths.socket_path())
         .await
         .context("IPC ソケットを作成できません")?;
     tokio::spawn(ipc_server::run(shared.clone(), listener));
@@ -119,7 +119,7 @@ pub async fn stop(shared: &Arc<Shared>) {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let _ = std::fs::remove_file(shared.paths.socket_path());
+    backup_ipc::transport::cleanup(&shared.paths.socket_path());
     tracing::info!("daemon stopped");
 }
 
@@ -139,7 +139,21 @@ async fn native_backend(paths: &AppPaths, staging: &Staging) -> anyhow::Result<D
     Ok(DeviceBackend::UDisks(b))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+async fn native_backend(paths: &AppPaths, staging: &Staging) -> anyhow::Result<DeviceBackend> {
+    let policy = backup_device::ExclusionPolicy {
+        protected_paths: vec![
+            staging.root().to_path_buf(),
+            paths.data_dir.clone(),
+            backup_config::home_dir(),
+        ],
+    };
+    Ok(DeviceBackend::Windows(
+        backup_device::windows::WinBackend::new(policy),
+    ))
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 async fn native_backend(_: &AppPaths, _: &Staging) -> anyhow::Result<DeviceBackend> {
     anyhow::bail!(
         "この OS では実機メディアを扱えません。開発時は --simulate-media <DIR> を指定してください"

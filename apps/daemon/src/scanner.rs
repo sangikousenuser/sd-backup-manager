@@ -4,9 +4,9 @@
 //! 異常に深い階層・大量ファイルにも上限を設ける（11 章-6）。
 
 use backup_core::manifest::hex_encode;
+use backup_storage::platform::{is_link_like, mtime_ns};
+use std::ffi::OsStr;
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
@@ -63,7 +63,7 @@ pub fn scan_partition(root: &Path, index: u32, cancel: &CancellationToken) -> Sc
         for entry in children {
             let name = entry.file_name();
             let mut comps = prefix.clone();
-            comps.push(name.as_bytes().to_vec());
+            comps.push(name_bytes(&name));
             let path = entry.path();
             let meta = match fs::symlink_metadata(&path) {
                 Ok(m) => m,
@@ -75,7 +75,7 @@ pub fn scan_partition(root: &Path, index: u32, cancel: &CancellationToken) -> Sc
                 }
             };
             let ft = meta.file_type();
-            if ft.is_symlink() {
+            if ft.is_symlink() || is_link_like(&meta) {
                 result.warnings.push(format!(
                     "シンボリックリンクは取り込みません: {}",
                     display(&comps)
@@ -109,7 +109,7 @@ pub fn scan_partition(root: &Path, index: u32, cancel: &CancellationToken) -> Sc
                     components,
                     raw_hex,
                     size: meta.len(),
-                    mtime_ns: meta.mtime() * 1_000_000_000 + meta.mtime_nsec(),
+                    mtime_ns: mtime_ns(&meta),
                 });
             } else {
                 result
@@ -120,6 +120,20 @@ pub fn scan_partition(root: &Path, index: u32, cancel: &CancellationToken) -> Sc
     }
     result.files.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     result
+}
+
+/// ファイル名のバイト列。Unix は生バイト、Windows は UTF-16 を UTF-8 に変換したもの
+/// （不正なサロゲートを含む名前は置換文字になり、コピーは失敗として報告される）。
+fn name_bytes(name: &OsStr) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        name.as_bytes().to_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        name.to_string_lossy().into_owned().into_bytes()
+    }
 }
 
 fn display(comps: &[Vec<u8>]) -> String {
@@ -142,6 +156,7 @@ fn display_or_root(comps: &[Vec<u8>]) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn scans_regular_files_and_skips_links() {
         let dir = tempfile::tempdir().unwrap();

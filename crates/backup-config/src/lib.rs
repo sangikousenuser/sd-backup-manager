@@ -36,23 +36,42 @@ pub struct AppPaths {
 }
 
 impl AppPaths {
-    /// XDG Base Directory に従う。開発用に `SDBM_BASE_DIR` があればその配下にまとめる。
+    /// Linux/macOS は XDG Base Directory、Windows は %APPDATA% / %LOCALAPPDATA% に従う。
+    /// 開発用に `SDBM_BASE_DIR` があればその配下にまとめる。
     pub fn from_env() -> Self {
         if let Some(base) = env_path("SDBM_BASE_DIR") {
             return Self::under(&base);
         }
-        let home = home_dir();
-        let config_home = env_path("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"));
-        let data_home = env_path("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local/share"));
-        let runtime = env_path("XDG_RUNTIME_DIR")
-            .map(|p| p.join(APP_DIR_NAME))
-            .unwrap_or_else(|| std::env::temp_dir().join(format!("{APP_DIR_NAME}-{}", nix_uid())));
-        let data_dir = data_home.join(APP_DIR_NAME);
-        Self {
-            config_dir: config_home.join(APP_DIR_NAME),
-            log_dir: data_dir.join("logs"),
-            data_dir,
-            runtime_dir: runtime,
+        #[cfg(windows)]
+        {
+            let home = home_dir();
+            let roaming = env_path("APPDATA").unwrap_or_else(|| home.join("AppData\\Roaming"));
+            let local = env_path("LOCALAPPDATA").unwrap_or_else(|| home.join("AppData\\Local"));
+            let data_dir = local.join(APP_DIR_NAME);
+            Self {
+                config_dir: roaming.join(APP_DIR_NAME),
+                log_dir: data_dir.join("logs"),
+                runtime_dir: data_dir.join("run"),
+                data_dir,
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let home = home_dir();
+            let config_home = env_path("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"));
+            let data_home = env_path("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local/share"));
+            let runtime = env_path("XDG_RUNTIME_DIR")
+                .map(|p| p.join(APP_DIR_NAME))
+                .unwrap_or_else(|| {
+                    std::env::temp_dir().join(format!("{APP_DIR_NAME}-{}", current_uid()))
+                });
+            let data_dir = data_home.join(APP_DIR_NAME);
+            Self {
+                config_dir: config_home.join(APP_DIR_NAME),
+                log_dir: data_dir.join("logs"),
+                data_dir,
+                runtime_dir: runtime,
+            }
         }
     }
 
@@ -78,27 +97,58 @@ impl AppPaths {
         self.data_dir.join("state.sqlite")
     }
 
+    /// IPC の接続先。Unix: `<runtime_dir>/daemon.sock`。
+    /// Windows: 名前付きパイプ `\\.\pipe\sd-backup-manager-<runtime_dir のハッシュ>`
+    /// （同じ設定のデーモン・GUI・CLI は同じ名前になり、テスト環境同士は衝突しない）。
     pub fn socket_path(&self) -> PathBuf {
-        self.runtime_dir.join("daemon.sock")
+        #[cfg(windows)]
+        {
+            let key = self.runtime_dir.to_string_lossy().to_lowercase();
+            PathBuf::from(format!(
+                r"\\.\pipe\{APP_DIR_NAME}-{:016x}",
+                fnv1a(key.as_bytes())
+            ))
+        }
+        #[cfg(not(windows))]
+        {
+            self.runtime_dir.join("daemon.sock")
+        }
     }
 
     pub fn ensure_dirs(&self) -> io::Result<()> {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         for d in [
             &self.config_dir,
             &self.data_dir,
             &self.log_dir,
             &self.runtime_dir,
         ] {
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(d)?;
+            let mut b = fs::DirBuilder::new();
+            b.recursive(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                b.mode(0o700);
+            }
+            b.create(d)?;
         }
-        // ソケットディレクトリは必ず 0700（6.4）
-        fs::set_permissions(&self.runtime_dir, fs::Permissions::from_mode(0o700))?;
+        // ソケットディレクトリは必ず 0700（6.4）。Windows はユーザープロファイルの ACL に従う
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&self.runtime_dir, fs::Permissions::from_mode(0o700))?;
+        }
         Ok(())
     }
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
 }
 
 fn env_path(name: &str) -> Option<PathBuf> {
@@ -109,12 +159,17 @@ fn env_path(name: &str) -> Option<PathBuf> {
 }
 
 pub fn home_dir() -> PathBuf {
-    std::env::var_os("HOME")
+    #[cfg(windows)]
+    let var = "USERPROFILE";
+    #[cfg(not(windows))]
+    let var = "HOME";
+    std::env::var_os(var)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
+        .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" }))
 }
 
-fn nix_uid() -> u32 {
+#[cfg(not(windows))]
+fn current_uid() -> u32 {
     // std だけで uid を得る（/proc/self に依存しない）
     use std::os::unix::fs::MetadataExt;
     fs::metadata(home_dir()).map(|m| m.uid()).unwrap_or(0)
@@ -347,7 +402,6 @@ impl Config {
 
     /// 一時ファイル + rename で原子的に保存（0600）。
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
-        use std::os::unix::fs::OpenOptionsExt;
         let text = toml::to_string_pretty(self)?;
         let dir = path
             .parent()
@@ -355,16 +409,20 @@ impl Config {
         fs::create_dir_all(dir)?;
         let tmp = dir.join(format!(".config.toml.{}.tmp", uuid::Uuid::new_v4()));
         {
-            let mut f = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&tmp)?;
+            let mut o = fs::OpenOptions::new();
+            o.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                o.mode(0o600);
+            }
+            let mut f = o.open(&tmp)?;
             f.write_all(b"# SD Backup Manager settings (no secrets are stored here)\n")?;
             f.write_all(text.as_bytes())?;
             f.sync_all()?;
         }
         fs::rename(&tmp, path)?;
+        #[cfg(unix)]
         fs::File::open(dir)?.sync_all()?;
         Ok(())
     }
@@ -386,6 +444,20 @@ impl SmbUrl {
     /// 共有ルートの URI（`gio mount` 用）。
     pub fn share_uri(&self) -> String {
         format!("smb://{}/{}/", self.host, self.share)
+    }
+
+    /// Windows の UNC パス（共有ルート）: `\\server\share`
+    pub fn unc_share(&self) -> String {
+        format!(r"\\{}\{}", self.host, self.share)
+    }
+
+    /// Windows の UNC パス（サブパスを含む保存先）
+    pub fn unc_path(&self) -> String {
+        if self.subpath.is_empty() {
+            self.unc_share()
+        } else {
+            format!(r"{}\{}", self.unc_share(), self.subpath.replace('/', "\\"))
+        }
     }
 }
 
@@ -494,8 +566,10 @@ mod tests {
         assert_eq!(u.share, "FestivalBackup");
         assert_eq!(u.subpath, "");
         assert_eq!(u.share_uri(), "smb://nas.example.local/FestivalBackup/");
+        assert_eq!(u.unc_share(), r"\\nas.example.local\FestivalBackup");
         let u = parse_smb_url("smb://192.168.1.10/share/a/b").unwrap();
         assert_eq!(u.subpath, "a/b");
+        assert_eq!(u.unc_path(), r"\\192.168.1.10\share\a\b");
         assert!(parse_smb_url("smb://user:pass@nas/share").is_err());
         assert!(parse_smb_url("http://nas/share").is_err());
         assert!(parse_smb_url("smb://nas/").is_err());

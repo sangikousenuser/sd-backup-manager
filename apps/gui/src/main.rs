@@ -1,3 +1,6 @@
+// Windows ではコンソールウィンドウを出さない
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 //! SD Backup Manager GUI（Iced）。
 //!
 //! GUI はバックアップ状態を持たず、デーモンから配信されるスナップショットを表示するだけ。

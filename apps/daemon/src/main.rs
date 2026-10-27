@@ -1,3 +1,6 @@
+// リリースビルドの Windows ではコンソールウィンドウを出さない（ログはファイルへ）
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use clap::Parser;
 use sd_backup_daemon::state::Overrides;
 use sd_backup_daemon::{DaemonOptions, run, telemetry};
@@ -36,15 +39,7 @@ fn main() -> anyhow::Result<()> {
         let shutdown = CancellationToken::new();
         let sd = shutdown.clone();
         tokio::spawn(async move {
-            use tokio::signal::unix::{SignalKind, signal};
-            let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
-            let mut int = signal(SignalKind::interrupt()).expect("SIGINT handler");
-            let mut hup = signal(SignalKind::hangup()).expect("SIGHUP handler");
-            tokio::select! {
-                _ = term.recv() => tracing::info!("SIGTERM received"),
-                _ = int.recv() => tracing::info!("SIGINT received"),
-                _ = hup.recv() => tracing::info!("SIGHUP received"),
-            }
+            wait_for_stop_signal().await;
             sd.cancel();
         });
         let opts = DaemonOptions {
@@ -65,4 +60,39 @@ fn main() -> anyhow::Result<()> {
             }
         }
     })
+}
+
+/// 停止要求を待つ。Unix: SIGTERM/SIGINT/SIGHUP（systemd の停止・ログアウト）。
+/// Windows: Ctrl+C / Ctrl+Break / コンソールを閉じる / ログオフ / シャットダウン。
+/// コンソールを持たない常駐プロセスは強制終了されることがあるが、その場合も起動時の復旧で
+/// 安全にやり直せる（設計書 9.3）。インストーラは `sd-backup shutdown` で正常停止を要求する。
+async fn wait_for_stop_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
+        let mut int = signal(SignalKind::interrupt()).expect("SIGINT handler");
+        let mut hup = signal(SignalKind::hangup()).expect("SIGHUP handler");
+        tokio::select! {
+            _ = term.recv() => tracing::info!("SIGTERM received"),
+            _ = int.recv() => tracing::info!("SIGINT received"),
+            _ = hup.recv() => tracing::info!("SIGHUP received"),
+        }
+    }
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close, ctrl_logoff, ctrl_shutdown};
+        let mut c = ctrl_c().expect("ctrl_c handler");
+        let mut b = ctrl_break().expect("ctrl_break handler");
+        let mut close = ctrl_close().expect("ctrl_close handler");
+        let mut logoff = ctrl_logoff().expect("ctrl_logoff handler");
+        let mut shutdown = ctrl_shutdown().expect("ctrl_shutdown handler");
+        tokio::select! {
+            _ = c.recv() => tracing::info!("Ctrl+C received"),
+            _ = b.recv() => tracing::info!("Ctrl+Break received"),
+            _ = close.recv() => tracing::info!("console close received"),
+            _ = logoff.recv() => tracing::info!("logoff received"),
+            _ = shutdown.recv() => tracing::info!("system shutdown received"),
+        }
+    }
 }

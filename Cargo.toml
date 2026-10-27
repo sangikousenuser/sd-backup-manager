@@ -45,6 +45,16 @@ unicode-normalization = "0.1"
 tempfile = "3"
 clap = { version = "4", features = ["derive"] }
 nix = { version = "0.31", features = ["fs", "user"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_WindowsProgramming",
+    "Win32_NetworkManagement_WNet",
+    "Win32_Media_Audio",
+] }
 
 [profile.release]
 lto = "thin"

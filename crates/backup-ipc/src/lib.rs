@@ -1,7 +1,8 @@
-//! デーモンと GUI/CLI 間の IPC（Unix Domain Socket、同一 UID のみ）。
+//! デーモンと GUI/CLI 間の IPC。
+//! Linux/macOS: Unix Domain Socket（同一 UID のみ）、Windows: 名前付きパイプ（ローカルのみ）。
 
-pub mod auth;
 pub mod protocol;
+pub mod transport;
 
 pub use protocol::*;
 
@@ -9,9 +10,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::path::Path;
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
+pub use transport::{Reader, Writer};
 
 #[derive(Debug, Error)]
 pub enum IpcError {
@@ -34,8 +34,8 @@ pub enum IpcError {
 }
 
 /// 長さ制限付きで 1 行読む。EOF なら None。
-pub async fn read_line_limited(
-    reader: &mut BufReader<OwnedReadHalf>,
+pub async fn read_line_limited<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
 ) -> Result<Option<Vec<u8>>, IpcError> {
     let mut line = Vec::new();
     loop {
@@ -64,8 +64,8 @@ pub async fn read_line_limited(
     }
 }
 
-pub async fn read_message<T: DeserializeOwned>(
-    reader: &mut BufReader<OwnedReadHalf>,
+pub async fn read_message<T: DeserializeOwned, R: AsyncBufRead + Unpin>(
+    reader: &mut R,
 ) -> Result<Option<T>, IpcError> {
     match read_line_limited(reader).await? {
         Some(line) => Ok(Some(serde_json::from_slice(&line)?)),
@@ -73,8 +73,8 @@ pub async fn read_message<T: DeserializeOwned>(
     }
 }
 
-pub async fn write_message<T: Serialize>(
-    writer: &mut OwnedWriteHalf,
+pub async fn write_message<T: Serialize, W: AsyncWrite + Unpin>(
+    writer: &mut W,
     msg: &T,
 ) -> Result<(), IpcError> {
     let mut bytes = serde_json::to_vec(msg)?;
@@ -86,22 +86,20 @@ pub async fn write_message<T: Serialize>(
 
 /// クライアント側の接続。
 pub struct Client {
-    reader: BufReader<OwnedReadHalf>,
-    writer: OwnedWriteHalf,
+    reader: Reader,
+    writer: Writer,
     next_id: u64,
     pub daemon_version: String,
 }
 
 impl Client {
     pub async fn connect(socket: &Path, client_name: &str) -> Result<Self, IpcError> {
-        let stream = UnixStream::connect(socket)
+        let (reader, writer) = transport::connect(socket)
             .await
             .map_err(IpcError::Connect)?;
-        auth::verify_peer(&stream).map_err(IpcError::Connect)?;
-        let (r, w) = stream.into_split();
         let mut c = Client {
-            reader: BufReader::new(r),
-            writer: w,
+            reader,
+            writer,
             next_id: 1,
             daemon_version: String::new(),
         };
@@ -113,7 +111,7 @@ impl Client {
             },
         )
         .await?;
-        match read_message::<ServerMessage>(&mut c.reader).await? {
+        match read_message::<ServerMessage, _>(&mut c.reader).await? {
             Some(ServerMessage::Hello {
                 protocol_version,
                 daemon_version,
@@ -138,7 +136,7 @@ impl Client {
         self.next_id += 1;
         write_message(&mut self.writer, &ClientMessage::Request { id, command }).await?;
         loop {
-            match read_message::<ServerMessage>(&mut self.reader).await? {
+            match read_message::<ServerMessage, _>(&mut self.reader).await? {
                 Some(ServerMessage::Response { id: rid, result }) if rid == id => {
                     return result.map_err(IpcError::Remote);
                 }
@@ -150,7 +148,7 @@ impl Client {
 
     /// `Subscribe` 後に次のメッセージを待つ。
     pub async fn next_message(&mut self) -> Result<ServerMessage, IpcError> {
-        read_message::<ServerMessage>(&mut self.reader)
+        read_message::<ServerMessage, _>(&mut self.reader)
             .await?
             .ok_or(IpcError::Closed)
     }

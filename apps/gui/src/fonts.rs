@@ -30,6 +30,10 @@ const CANDIDATES: &[(&str, &str)] = &[
         "/usr/share/fonts/truetype/takao-gothic/TakaoPGothic.ttf",
         "TakaoPGothic",
     ),
+    // Windows（標準でインストールされている日本語フォント）
+    ("C:\\Windows\\Fonts\\meiryo.ttc", "Meiryo"),
+    ("C:\\Windows\\Fonts\\YuGothM.ttc", "Yu Gothic"),
+    ("C:\\Windows\\Fonts\\msgothic.ttc", "MS Gothic"),
     (
         "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
         "Hiragino Sans",
@@ -42,7 +46,12 @@ const CANDIDATES: &[(&str, &str)] = &[
 
 pub fn find_japanese_font() -> Option<(Vec<u8>, &'static str)> {
     for (path, family) in CANDIDATES {
-        if let Ok(bytes) = std::fs::read(path) {
+        // Windows がシステムドライブ以外にある場合に備えて %WINDIR% も見る
+        let path = match (path.strip_prefix("C:\\Windows"), std::env::var("WINDIR")) {
+            (Some(rest), Ok(windir)) => format!("{windir}{rest}"),
+            _ => path.to_string(),
+        };
+        if let Ok(bytes) = std::fs::read(&path) {
             return Some((bytes, family));
         }
     }

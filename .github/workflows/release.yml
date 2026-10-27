@@ -39,9 +39,29 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  build-windows:
+    name: build (Windows x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace --locked
+      - run: cargo build --release --workspace --locked
+      - name: Package (zip + Inno Setup installer)
+        shell: pwsh
+        run: scripts/package-windows.ps1 -Tag $env:GITHUB_REF_NAME -BinDir target\release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: |
+            dist/*.exe
+            dist/*.zip
+            dist/SHA256SUMS-windows
+          if-no-files-found: error
+
   publish:
     name: publish GitHub Release
-    needs: build
+    needs: [build, build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -51,8 +71,16 @@ jobs:
         with:
           name: release
           path: dist
-      - name: Verify checksums
-        run: cd dist && sha256sum -c SHA256SUMS
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-windows
+          path: dist
+      - name: Merge and verify checksums
+        run: |
+          cd dist
+          cat SHA256SUMS-windows >> SHA256SUMS
+          rm SHA256SUMS-windows
+          sha256sum -c SHA256SUMS
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -60,4 +88,5 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "SD Backup Manager $GITHUB_REF_NAME" \
             --notes-file .github/release-notes.md \
-            dist/*.deb dist/*.tar.gz dist/SHA256SUMS dist/install.sh
+            dist/*.deb dist/*.tar.gz dist/install.sh \
+            dist/sd-backup-manager-setup-x64.exe dist/*windows.zip dist/SHA256SUMS

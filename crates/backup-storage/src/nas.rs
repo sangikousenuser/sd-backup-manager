@@ -89,25 +89,60 @@ impl NasError {
     }
 
     pub fn from_io(e: io::Error) -> Self {
-        use nix::errno::Errno;
-        match e.raw_os_error().map(Errno::from_raw) {
-            Some(Errno::ENOSPC) | Some(Errno::EDQUOT) => NasError::NoSpace,
-            Some(Errno::EACCES) | Some(Errno::EPERM) | Some(Errno::EROFS) => {
-                NasError::Permission(e.to_string())
-            }
-            Some(
-                Errno::ENOTCONN
-                | Errno::EHOSTDOWN
-                | Errno::EHOSTUNREACH
-                | Errno::ENETDOWN
-                | Errno::ENETUNREACH
-                | Errno::ETIMEDOUT
-                | Errno::ECONNRESET
-                | Errno::ECONNABORTED
-                | Errno::ESTALE,
-            ) => NasError::Offline(e.to_string()),
-            _ => NasError::Io(e.to_string()),
+        match classify_os_error(e.raw_os_error()) {
+            ErrClass::NoSpace => NasError::NoSpace,
+            ErrClass::Permission => NasError::Permission(e.to_string()),
+            ErrClass::Offline => NasError::Offline(e.to_string()),
+            ErrClass::Other => NasError::Io(e.to_string()),
         }
+    }
+}
+
+enum ErrClass {
+    NoSpace,
+    Permission,
+    Offline,
+    Other,
+}
+
+#[cfg(unix)]
+fn classify_os_error(code: Option<i32>) -> ErrClass {
+    use nix::errno::Errno;
+    match code.map(Errno::from_raw) {
+        Some(Errno::ENOSPC) | Some(Errno::EDQUOT) => ErrClass::NoSpace,
+        Some(Errno::EACCES) | Some(Errno::EPERM) | Some(Errno::EROFS) => ErrClass::Permission,
+        Some(
+            Errno::ENOTCONN
+            | Errno::EHOSTDOWN
+            | Errno::EHOSTUNREACH
+            | Errno::ENETDOWN
+            | Errno::ENETUNREACH
+            | Errno::ETIMEDOUT
+            | Errno::ECONNRESET
+            | Errno::ECONNABORTED
+            | Errno::ESTALE,
+        ) => ErrClass::Offline,
+        _ => ErrClass::Other,
+    }
+}
+
+/// Win32 エラーコード（SMB/UNC で返るもの）の分類。
+#[cfg(windows)]
+fn classify_os_error(code: Option<i32>) -> ErrClass {
+    match code {
+        // ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL, ERROR_DISK_QUOTA_EXCEEDED
+        Some(39) | Some(112) | Some(1295) => ErrClass::NoSpace,
+        // ERROR_ACCESS_DENIED, ERROR_WRITE_PROTECT, ERROR_LOGON_FAILURE, ERROR_NETWORK_ACCESS_DENIED
+        Some(5) | Some(19) | Some(1326) | Some(65) => ErrClass::Permission,
+        // ERROR_BAD_NETPATH, ERROR_NETNAME_DELETED, ERROR_UNEXP_NET_ERR, ERROR_DEV_NOT_EXIST,
+        // ERROR_BAD_NET_NAME, ERROR_SEM_TIMEOUT, ERROR_NETWORK_UNREACHABLE, ERROR_HOST_UNREACHABLE,
+        // ERROR_NO_NET_OR_BAD_PATH, ERROR_CONNECTION_ABORTED, ERROR_NOT_CONNECTED, ERROR_NETWORK_BUSY,
+        // ERROR_REM_NOT_LIST, ERROR_BAD_NET_RESP
+        Some(53) | Some(64) | Some(59) | Some(55) | Some(67) | Some(121) | Some(1231)
+        | Some(1232) | Some(1222) | Some(1236) | Some(2250) | Some(54) | Some(51) | Some(58) => {
+            ErrClass::Offline
+        }
+        _ => ErrClass::Other,
     }
 }
 

@@ -11,7 +11,6 @@ use backup_core::paths::validate_relative;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
-use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -116,6 +115,20 @@ enum Outcome {
     AlreadyPresent,
 }
 
+/// UTF-8 でない元ファイル名（Linux の ext4 等）を復元する。Windows ではバイト列のファイル名を
+/// 作れないため、UTF-8 として解釈できる範囲で置き換える。
+fn raw_component(bytes: &[u8]) -> OsString {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        OsString::from_vec(bytes.to_vec())
+    }
+    #[cfg(not(unix))]
+    {
+        OsString::from(String::from_utf8_lossy(bytes).replace(['\\', ':'], "_"))
+    }
+}
+
 fn join_rel(base: &Path, rel: &str) -> Result<PathBuf, String> {
     let comps = validate_relative(rel).map_err(|e| e.to_string())?;
     let mut p = base.to_path_buf();
@@ -139,7 +152,7 @@ fn restore_target(
                 if comp.is_empty() || comp == b"." || comp == b".." || comp.contains(&0) {
                     return Err("不正な元パスです".into());
                 }
-                p.push(OsString::from_vec(comp.to_vec()));
+                p.push(raw_component(comp));
             }
         }
         None => {

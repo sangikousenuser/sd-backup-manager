@@ -7,11 +7,11 @@
 //! 5. 同一 FS 内で最終名へ rename し、親ディレクトリを fsync
 
 use crate::hash::{hash_file, open_read_only};
+use crate::platform::{create_new_private, is_link_like, mtime_ns};
 use crate::{Control, Progress};
 use backup_core::IO_BUFFER_BYTES;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use thiserror::Error;
 
@@ -66,7 +66,7 @@ pub fn source_stat(path: &Path) -> io::Result<SourceStat> {
     let m = fs::symlink_metadata(path)?;
     Ok(SourceStat {
         size: m.len(),
-        mtime_ns: m.mtime() * 1_000_000_000 + m.mtime_nsec(),
+        mtime_ns: mtime_ns(&m),
     })
 }
 
@@ -77,12 +77,12 @@ pub fn copy_and_verify(
     progress: Progress<'_>,
 ) -> Result<CopyOutcome, CopyError> {
     let before = fs::symlink_metadata(src).map_err(CopyError::SourceRead)?;
-    if !before.file_type().is_file() {
+    if !before.file_type().is_file() || is_link_like(&before) {
         return Err(CopyError::NotRegularFile);
     }
     let before_stat = SourceStat {
         size: before.len(),
-        mtime_ns: before.mtime() * 1_000_000_000 + before.mtime_nsec(),
+        mtime_ns: mtime_ns(&before),
     };
 
     if let Some(parent) = partial.parent() {
@@ -97,12 +97,7 @@ pub fn copy_and_verify(
 
     let source_hash = {
         let mut input = open_read_only(src).map_err(CopyError::SourceRead)?;
-        let mut out = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(partial)
-            .map_err(CopyError::DestWrite)?;
+        let mut out = create_new_private(partial).map_err(CopyError::DestWrite)?;
         let result = stream_copy(&mut input, &mut out, progress);
         let hash = match result {
             Ok(h) => h,
@@ -225,6 +220,7 @@ mod tests {
         assert!(!dest.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn rejects_symlink_and_missing() {
         let dir = tempfile::tempdir().unwrap();
@@ -263,7 +259,10 @@ mod tests {
             if first {
                 first = false;
                 // コピー途中で別プロセスが追記した状況を模擬
-                let mut f = OpenOptions::new().append(true).open(&src2).unwrap();
+                let mut f = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&src2)
+                    .unwrap();
                 f.write_all(b"more").unwrap();
             }
             Control::Continue

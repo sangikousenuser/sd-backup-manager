@@ -617,7 +617,7 @@ fn register_files(
 }
 
 fn source_path(mount: &std::path::Path, f: &FileRow) -> std::path::PathBuf {
-    use std::os::unix::ffi::OsStringExt;
+    #[cfg(unix)]
     if let Some(bytes) = f
         .source_rel_path_raw_hex
         .as_deref()
@@ -625,6 +625,7 @@ fn source_path(mount: &std::path::Path, f: &FileRow) -> std::path::PathBuf {
     {
         let mut p = mount.to_path_buf();
         for c in bytes.split(|b| *b == b'/') {
+            use std::os::unix::ffi::OsStringExt;
             p.push(std::ffi::OsString::from_vec(c.to_vec()));
         }
         return p;

@@ -3,7 +3,7 @@
 use crate::state::Shared;
 use crate::{nas_backend, nas_worker, orchestrator, telemetry};
 use backup_config::{Config, NasMode, secrets};
-use backup_ipc::auth::verify_peer;
+use backup_ipc::transport::{Listener, Reader, Writer};
 use backup_ipc::{
     ClientMessage, Command, EventSummary, FileSummary, NasTestReport, PROTOCOL_VERSION, Response,
     ServerMessage, SessionSummary, SettingsView, read_message, write_message,
@@ -11,21 +11,19 @@ use backup_ipc::{
 use backup_storage::nas::NasRoot;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::BufReader;
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 
-pub async fn run(shared: Arc<Shared>, listener: UnixListener) {
+pub async fn run(shared: Arc<Shared>, mut listener: Listener) {
     loop {
         let accepted = tokio::select! {
             _ = shared.shutdown.cancelled() => return,
             a = listener.accept() => a,
         };
         match accepted {
-            Ok((stream, _)) => {
+            Ok((reader, writer)) => {
                 let shared = shared.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(shared, stream).await {
+                    if let Err(e) = handle_connection(shared, reader, writer).await {
                         tracing::debug!("ipc connection closed: {e}");
                     }
                 });
@@ -38,11 +36,12 @@ pub async fn run(shared: Arc<Shared>, listener: UnixListener) {
     }
 }
 
-async fn handle_connection(shared: Arc<Shared>, stream: UnixStream) -> anyhow::Result<()> {
-    verify_peer(&stream)?;
-    let (r, mut w) = stream.into_split();
-    let mut reader = BufReader::new(r);
-    match read_message::<ClientMessage>(&mut reader).await? {
+async fn handle_connection(
+    shared: Arc<Shared>,
+    mut reader: Reader,
+    mut w: Writer,
+) -> anyhow::Result<()> {
+    match read_message::<ClientMessage, _>(&mut reader).await? {
         Some(ClientMessage::Hello {
             protocol_version, ..
         }) => {
@@ -64,7 +63,7 @@ async fn handle_connection(shared: Arc<Shared>, stream: UnixStream) -> anyhow::R
     // 読み込みは専用タスクで行い（途中まで読んだ行を失わないため）、チャネル経由で受け取る
     let (tx, mut rx) = mpsc::channel::<ClientMessage>(16);
     let reader_task = tokio::spawn(async move {
-        while let Ok(Some(msg)) = read_message::<ClientMessage>(&mut reader).await {
+        while let Ok(Some(msg)) = read_message::<ClientMessage, _>(&mut reader).await {
             if tx.send(msg).await.is_err() {
                 break;
             }
@@ -254,6 +253,18 @@ async fn handle_command(shared: &Arc<Shared>, command: Command) -> Result<Respon
             session_id,
             dest_dir,
         } => restore(shared, session_id, dest_dir).await,
+        Command::Shutdown => {
+            shared.event(None, "info", "shutdown_requested", "停止が要求されました");
+            let sd = shared.shutdown.clone();
+            // 応答を返してから停止する
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                sd.cancel();
+            });
+            Ok(Response::Ok {
+                message: "停止します".into(),
+            })
+        }
     }
 }
 

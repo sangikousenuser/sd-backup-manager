@@ -84,6 +84,26 @@ fn sound_file(kind: NotificationKind) -> Option<PathBuf> {
 pub fn play(kind: NotificationKind) {
     let Some(path) = sound_file(kind) else { return };
     std::thread::spawn(move || {
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            use windows_sys::Win32::Media::Audio::{
+                PlaySoundW, SND_FILENAME, SND_NODEFAULT, SND_SYNC,
+            };
+            let w: Vec<u16> = path
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            unsafe {
+                PlaySoundW(
+                    w.as_ptr(),
+                    std::ptr::null_mut(),
+                    SND_FILENAME | SND_SYNC | SND_NODEFAULT,
+                );
+            }
+        }
+        #[cfg(not(windows))]
         for player in ["paplay", "pw-play", "aplay", "afplay"] {
             let mut cmd = std::process::Command::new(player);
             if player == "aplay" {

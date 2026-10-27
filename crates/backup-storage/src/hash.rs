@@ -2,7 +2,7 @@
 
 use crate::{Control, Progress};
 use backup_core::IO_BUFFER_BYTES;
-use std::fs::File;
+
 use std::io::{self, Read};
 use std::path::Path;
 
@@ -41,14 +41,7 @@ pub fn hash_file(path: &Path, progress: Progress<'_>) -> io::Result<HashOutcome>
     hash_reader(&mut f, progress)
 }
 
-/// シンボリックリンクを辿らずに読み込み専用で開く。
-pub fn open_read_only(path: &Path) -> io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
-        .open(path)
-}
+pub use crate::platform::open_read_only;
 
 #[cfg(test)]
 mod tests {
@@ -71,6 +64,7 @@ mod tests {
         assert_eq!(out.hash, blake3::hash(&data).to_hex().to_string());
     }
 
+    #[cfg(unix)]
     #[test]
     fn refuses_symlinks() {
         let dir = tempfile::tempdir().unwrap();

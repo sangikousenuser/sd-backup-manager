@@ -33,8 +33,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 開発機 (macOS) と実機系 (Linux) の両方でロジックを検証する
-        os: [ubuntu-latest, macos-latest]
+        # 実機（Windows / Linux）と開発機（macOS）のすべてでロジックを検証する
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -95,4 +95,27 @@ jobs:
             dist/*.deb
             dist/SHA256SUMS
             dist/install.sh
+          retention-days: 14
+
+  build-windows:
+    name: release build (Windows x64)
+    runs-on: windows-latest
+    needs: [fmt, lint-test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-release
+      - run: cargo build --release --workspace --locked
+      - name: Package (zip + Inno Setup installer)
+        shell: pwsh
+        run: scripts/package-windows.ps1 -Tag "ci-$($env:GITHUB_SHA.Substring(0,8))" -BinDir target\release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sd-backup-manager-windows-x64
+          path: |
+            dist/*.exe
+            dist/*.zip
+            dist/SHA256SUMS-windows
           retention-days: 14

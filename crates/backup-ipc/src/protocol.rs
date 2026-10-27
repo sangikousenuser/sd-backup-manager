@@ -62,6 +62,8 @@ pub enum Command {
         session_id: String,
         dest_dir: String,
     },
+    /// デーモンの正常停止（インストーラ・更新時に使う。処理中のコピーは安全に中断される）
+    Shutdown,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

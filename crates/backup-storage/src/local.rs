@@ -8,11 +8,11 @@
 //!
 //! 削除は `sessions/<session_id>` に限定し、symlink・マウント境界・所有者を検証してから行う。
 
+use crate::platform::{create_private_dir_all, is_link_like, owned_by_current_user};
 use backup_core::paths::validate_relative;
 use backup_core::session::is_valid_session_id;
 use std::fs;
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -43,6 +43,7 @@ pub enum StagingError {
 #[derive(Debug, Clone)]
 pub struct Staging {
     root: PathBuf,
+    #[cfg_attr(windows, allow(dead_code))]
     root_dev: u64,
 }
 
@@ -50,32 +51,29 @@ impl Staging {
     /// ルートを作成/検証する。ルート自体がシンボリックリンクなら拒否。
     pub fn open(root: &Path) -> Result<Self, StagingError> {
         match fs::symlink_metadata(root) {
-            Ok(m) if m.file_type().is_symlink() => {
+            Ok(m) if is_link_like(&m) => {
                 return Err(StagingError::Symlink(root.to_path_buf()));
             }
             Ok(m) if !m.is_dir() => return Err(StagingError::NotDirectory(root.to_path_buf())),
             Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                fs::DirBuilder::new()
-                    .recursive(true)
-                    .mode(0o700)
-                    .create(root)?;
+                create_private_dir_all(root)?;
             }
             Err(e) => return Err(e.into()),
         }
         let meta = fs::metadata(root)?;
-        if meta.uid() != nix::unistd::geteuid().as_raw() {
+        if !owned_by_current_user(&meta) {
             return Err(StagingError::WrongOwner(root.to_path_buf()));
         }
         let root = fs::canonicalize(root)?;
         let sessions = root.join("sessions");
         match fs::symlink_metadata(&sessions) {
-            Ok(m) if m.file_type().is_symlink() => return Err(StagingError::Symlink(sessions)),
+            Ok(m) if is_link_like(&m) => return Err(StagingError::Symlink(sessions)),
             Ok(_) => {}
-            Err(_) => fs::DirBuilder::new().mode(0o700).create(&sessions)?,
+            Err(_) => create_private_dir_all(&sessions)?,
         }
         Ok(Self {
-            root_dev: meta.dev(),
+            root_dev: crate::platform::volume_id(&root)?,
             root,
         })
     }
@@ -132,7 +130,7 @@ impl Staging {
             let Ok(meta) = fs::symlink_metadata(&partial) else {
                 continue;
             };
-            if !meta.is_dir() || meta.file_type().is_symlink() {
+            if !meta.is_dir() || is_link_like(&meta) {
                 continue;
             }
             for f in fs::read_dir(&partial)? {
@@ -155,7 +153,7 @@ impl Staging {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e.into()),
         };
-        if meta.file_type().is_symlink() {
+        if is_link_like(&meta) {
             return Err(StagingError::Symlink(dir));
         }
         if !meta.is_dir() {
@@ -165,7 +163,7 @@ impl Staging {
         if canonical.parent() != Some(&self.root.join("sessions")) {
             return Err(StagingError::OutsideRoot(canonical));
         }
-        if meta.uid() != nix::unistd::geteuid().as_raw() {
+        if !owned_by_current_user(&meta) {
             return Err(StagingError::WrongOwner(dir));
         }
         self.check_no_mount_boundary(&canonical)?;
@@ -183,7 +181,7 @@ impl Staging {
         let mut stack = vec![dir.to_path_buf()];
         while let Some(d) = stack.pop() {
             let m = fs::symlink_metadata(&d)?;
-            if m.dev() != self.root_dev {
+            if self.crosses_boundary(&m, &d)? {
                 return Err(StagingError::MountBoundary(d));
             }
             if m.is_dir() {
@@ -194,7 +192,7 @@ impl Staging {
                         stack.push(e.path());
                     } else {
                         let em = fs::symlink_metadata(e.path())?;
-                        if em.dev() != self.root_dev {
+                        if self.crosses_boundary(&em, &e.path())? {
                             return Err(StagingError::MountBoundary(e.path()));
                         }
                     }
@@ -202,6 +200,20 @@ impl Staging {
             }
         }
         Ok(())
+    }
+
+    /// 別ボリュームへの境界か。Unix は st_dev の比較、Windows はジャンクション・マウントポイント等の
+    /// リパースポイント（アプリ自身は作らない）を境界とみなして削除を拒否する。
+    fn crosses_boundary(&self, meta: &fs::Metadata, path: &Path) -> Result<bool, StagingError> {
+        #[cfg(unix)]
+        {
+            Ok(crate::platform::meta_volume_id(meta, path)? != self.root_dev)
+        }
+        #[cfg(windows)]
+        {
+            let _ = path;
+            Ok(is_link_like(meta))
+        }
     }
 
     /// セッションディレクトリの使用量（表示・診断用）。
@@ -269,6 +281,7 @@ mod tests {
 
     const SID: &str = "0192a1b2-0000-7000-8000-000000000001";
 
+    #[cfg(unix)]
     #[test]
     fn creates_root_and_rejects_symlink_root() {
         let dir = tempfile::tempdir().unwrap();
@@ -296,6 +309,7 @@ mod tests {
         assert!(s.partial_path(SID, "../x").is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn removes_only_the_session_and_not_symlink_targets() {
         let dir = tempfile::tempdir().unwrap();
@@ -329,6 +343,7 @@ mod tests {
         s.remove_session(SID).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn refuses_symlinked_session_dir() {
         let dir = tempfile::tempdir().unwrap();
