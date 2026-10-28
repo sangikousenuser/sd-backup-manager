@@ -20,7 +20,16 @@ pub struct Manifest {
     pub local_timezone: String,
     pub device: ManifestDevice,
     pub partitions: Vec<ManifestPartition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub directories: Vec<ManifestDirectory>,
     pub files: Vec<ManifestFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestDirectory {
+    pub partition_index: u32,
+    pub source_rel_path: String,
+    pub dest_rel_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +124,19 @@ impl Manifest {
         }
         let mut seen_src = std::collections::HashSet::new();
         let mut seen_dst = std::collections::HashSet::new();
+        for d in &m.directories {
+            for path in [&d.source_rel_path, &d.dest_rel_path] {
+                validate_relative(path).map_err(|source| ManifestError::Path {
+                    path: path.clone(),
+                    source,
+                })?;
+            }
+            if !m.partitions.iter().any(|p| p.index == d.partition_index) {
+                return Err(ManifestError::Invalid(
+                    "フォルダのパーティション番号が不正です".into(),
+                ));
+            }
+        }
         for f in &m.files {
             validate_relative(&f.source_rel_path).map_err(|source| ManifestError::Path {
                 path: f.source_rel_path.clone(),
@@ -189,6 +211,7 @@ mod tests {
 
     pub fn sample() -> Manifest {
         Manifest {
+            directories: Vec::new(),
             schema_version: 1,
             app_version: "0.1.0".into(),
             session_id: "0192a1b2-0000-7000-8000-000000000000".into(),

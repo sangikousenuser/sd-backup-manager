@@ -1,19 +1,22 @@
 //! 内蔵 SSD 上のステージング領域（7.1）。
 //!
 //! ```text
-//! <root>/sessions/<session_id>/{Photos,Videos,Other}/...
-//! <root>/sessions/<session_id>/.partial/<file_id>.part
-//! <root>/sessions/<session_id>/manifest.json
+//! <root>/sessions/sdN/<日時>/<元の構成>/...
+//! <root>/sessions/sdN/<日時>/.partial/<file_id>.part
+//! <root>/sessions/sdN/<日時>/manifest.json
 //! ```
 //!
-//! 削除は `sessions/<session_id>` に限定し、symlink・マウント境界・所有者を検証してから行う。
+//! DB で登録した日時フォルダだけを削除し、symlink・マウント境界・所有者を検証する。
+//! 旧セッションは `sessions/<session_id>` のまま再開する。
 
 use crate::platform::{create_private_dir_all, is_link_like, owned_by_current_user};
 use backup_core::paths::validate_relative;
 use backup_core::session::is_valid_session_id;
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -43,6 +46,7 @@ pub enum StagingError {
 #[derive(Debug, Clone)]
 pub struct Staging {
     root: PathBuf,
+    folders: Arc<RwLock<HashMap<String, String>>>,
     #[cfg_attr(windows, allow(dead_code))]
     root_dev: u64,
 }
@@ -73,6 +77,7 @@ impl Staging {
             Err(_) => create_private_dir_all(&sessions)?,
         }
         Ok(Self {
+            folders: Arc::default(),
             root_dev: crate::platform::volume_id(&root)?,
             root,
         })
@@ -86,7 +91,39 @@ impl Staging {
         if !is_valid_session_id(session_id) {
             return Err(StagingError::InvalidSessionId(session_id.to_string()));
         }
-        Ok(self.root.join("sessions").join(session_id))
+        let folders = self.folders.read().unwrap_or_else(|e| e.into_inner());
+        let dir = self.root.join("sessions").join(
+            folders
+                .get(session_id)
+                .map(String::as_str)
+                .unwrap_or(session_id),
+        );
+        let mut current = self.root.clone();
+        for component in dir
+            .strip_prefix(&self.root)
+            .map_err(|_| StagingError::OutsideRoot(dir.clone()))?
+        {
+            current.push(component);
+            if fs::symlink_metadata(&current).is_ok_and(|m| is_link_like(&m)) {
+                return Err(StagingError::Symlink(current));
+            }
+        }
+        Ok(dir)
+    }
+
+    pub fn register_session(&self, sid: &str, folder: &str) -> Result<(), StagingError> {
+        if !is_valid_session_id(sid) || !backup_core::session::is_valid_folder_name(folder) {
+            return Err(StagingError::InvalidPath(folder.into()));
+        }
+        if backup_core::session::is_card_folder(folder) {
+            let mut folders = self.folders.write().unwrap_or_else(|e| e.into_inner());
+            if folders.get(sid).is_some_and(|old| old != folder) {
+                return Err(StagingError::InvalidPath(folder.into()));
+            }
+            folders.insert(sid.into(), folder.into());
+        }
+        self.session_dir(sid)?;
+        Ok(())
     }
 
     pub fn partial_path(&self, session_id: &str, file_id: &str) -> Result<PathBuf, StagingError> {
@@ -119,6 +156,17 @@ impl Staging {
     pub fn clear_partials(&self) -> Result<usize, StagingError> {
         let mut removed = 0;
         let sessions = self.root.join("sessions");
+        let ids: Vec<String> = self
+            .folders
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect();
+        let mut dirs: Vec<PathBuf> = ids
+            .iter()
+            .map(|sid| self.session_dir(sid))
+            .collect::<Result<_, _>>()?;
         for entry in fs::read_dir(&sessions)? {
             let entry = entry?;
             let name = entry.file_name();
@@ -126,7 +174,10 @@ impl Staging {
             if !is_valid_session_id(name) {
                 continue;
             }
-            let partial = entry.path().join(".partial");
+            dirs.push(self.session_dir(name)?);
+        }
+        for dir in dirs {
+            let partial = dir.join(".partial");
             let Ok(meta) = fs::symlink_metadata(&partial) else {
                 continue;
             };
@@ -160,7 +211,7 @@ impl Staging {
             return Err(StagingError::NotDirectory(dir));
         }
         let canonical = fs::canonicalize(&dir)?;
-        if canonical.parent() != Some(&self.root.join("sessions")) {
+        if canonical != dir {
             return Err(StagingError::OutsideRoot(canonical));
         }
         if !owned_by_current_user(&meta) {
@@ -374,5 +425,40 @@ mod tests {
         assert_eq!(s.clear_partials().unwrap(), 1);
         assert!(!p.exists());
         assert!(done.exists());
+    }
+
+    #[test]
+    fn card_folders_recover_partials_and_delete_only_the_registered_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = Staging::open(dir.path()).unwrap();
+        stage.register_session(SID, "sd1/20261028112834").unwrap();
+        let path = stage.final_path(SID, "DCIM/a.jpg").unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"photo").unwrap();
+        let partial = stage.partial_path(SID, "abcd").unwrap();
+        fs::create_dir_all(partial.parent().unwrap()).unwrap();
+        fs::write(&partial, b"half").unwrap();
+        let other = dir.path().join("sessions/sd1/20261028112835/keep.txt");
+        fs::create_dir_all(other.parent().unwrap()).unwrap();
+        fs::write(&other, b"keep").unwrap();
+        let restarted = Staging::open(dir.path()).unwrap();
+        restarted
+            .register_session(SID, "sd1/20261028112834")
+            .unwrap();
+        assert_eq!(restarted.clear_partials().unwrap(), 1);
+        assert!(path.exists());
+        restarted.remove_session(SID).unwrap();
+        assert!(!path.exists());
+        assert!(other.exists());
+        assert!(
+            restarted
+                .register_session(SID, "sd1/20261028112835")
+                .is_err()
+        );
+        assert!(
+            restarted
+                .register_session(SID, "sd1/../20261028112834")
+                .is_err()
+        );
     }
 }

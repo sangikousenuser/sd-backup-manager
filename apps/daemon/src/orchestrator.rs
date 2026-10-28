@@ -281,7 +281,7 @@ async fn process_media(
     }
 
     // 3. セッション（中断セッションの再開 or 新規）
-    let (session, partitions) = {
+    let (device, partitions, resumable) = {
         let db = shared.db();
         let device = db.upsert_device(&media, confidence)?;
         let partitions = db.upsert_partitions(&device.device_id, &media.partitions)?;
@@ -290,19 +290,47 @@ async fn process_media(
         } else {
             None
         };
-        let session = match resumable {
-            Some(s) => s,
-            None => db.create_session(
+        (device, partitions, resumable)
+    };
+    let session = match resumable {
+        Some(s) => s,
+        None => {
+            let stable_key = media.stable_card_key();
+            let known = shared
+                .db()
+                .known_card(&device.device_id, stable_key.as_deref())?;
+            let card = match known {
+                Some(card)
+                    if confidence != Confidence::Ambiguous
+                        && (confidence.allows_resume_and_skip() || stable_key.is_some()) =>
+                {
+                    shared
+                        .db()
+                        .assign_card(&device.device_id, Some(&card), None)?;
+                    card
+                }
+                _ => shared.db().assign_card(
+                    &device.device_id,
+                    None,
+                    stable_key
+                        .as_deref()
+                        .filter(|_| confidence != Confidence::Ambiguous),
+                )?,
+            };
+            shared.db().create_card_session(
                 &device.device_id,
+                &card,
                 confidence,
                 chrono::Utc::now(),
                 &shared.config().timezone,
-            )?,
-        };
-        (session, partitions)
+            )?
+        }
     };
     let resumed = session.state != SessionState::Detected;
     let sid = session.session_id.clone();
+    shared
+        .staging
+        .register_session(&sid, &session.folder_name)?;
     with_slot(shared, slot, |s| {
         s.session_id = Some(sid.clone());
         s.folder_name = Some(session.folder_name.clone());
@@ -463,7 +491,8 @@ async fn process_media(
         let src = source_path(&mount, &f);
 
         // 過去の検証済み実体があればスキップ（元ファイルと NAS 実体の両方を照合できた場合のみ）
-        if confidence.allows_resume_and_skip()
+        if !backup_core::session::is_card_folder(&session.folder_name)
+            && confidence.allows_resume_and_skip()
             && let Some(fp) = fingerprints.get(&f.partition_index)
             && try_skip_verified(shared, &identity_hash, fp, &f, &src).await
         {
@@ -535,7 +564,21 @@ fn register_files(
         .clone();
     let db = shared.db();
     let existing = db.files_for_session(sid)?;
+    let source_tree = db
+        .get_session(sid)?
+        .is_some_and(|s| backup_core::session::is_card_folder(&s.folder_name));
     let mut allocator = DestinationAllocator::new();
+    // アプリの管理ファイルとSD内の同名ファイルを衝突させない。
+    if source_tree {
+        allocator.register_existing("manifest.json");
+        allocator.register_existing(".partial");
+        if partitions.len() > 1 {
+            for p in partitions {
+                let dir = allocator.allocate_directory("", &[partition_label(p.part_index)]);
+                std::fs::create_dir_all(shared.staging.final_path(sid, &dir)?)?;
+            }
+        }
+    }
     for f in &existing {
         allocator.register_existing(&f.destination_rel_path);
     }
@@ -548,6 +591,18 @@ fn register_files(
 
     let mut seen: std::collections::HashSet<(u32, String)> = std::collections::HashSet::new();
     for scan in scans {
+        if source_tree {
+            for (index, components) in &scan.directories {
+                let prefix = if partitions.len() > 1 {
+                    partition_label(*index)
+                } else {
+                    String::new()
+                };
+                let dest = allocator.allocate_directory(&prefix, components);
+                db.save_directory(sid, *index, &components.join("/"), &dest)?;
+                std::fs::create_dir_all(shared.staging.final_path(sid, &dest)?)?;
+            }
+        }
         let inputs: Vec<ClassifyInput> = scan
             .files
             .iter()
@@ -578,11 +633,19 @@ fn register_files(
                     let Some(part) = part_ids.get(&f.partition_index) else {
                         continue;
                     };
-                    let prefix = format!(
-                        "{}/{}",
-                        class.kind.folder(),
-                        partition_label(f.partition_index)
-                    );
+                    let prefix = if source_tree {
+                        if partitions.len() > 1 {
+                            partition_label(f.partition_index)
+                        } else {
+                            String::new()
+                        }
+                    } else {
+                        format!(
+                            "{}/{}",
+                            class.kind.folder(),
+                            partition_label(f.partition_index)
+                        )
+                    };
                     let dest = allocator.allocate(&prefix, &f.components);
                     let row = db.insert_file(&NewFile {
                         session_id: sid.to_string(),

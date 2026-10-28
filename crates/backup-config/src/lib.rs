@@ -168,6 +168,16 @@ pub fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" }))
 }
 
+/// Windows の内部パス表現をエクスプローラーで使える表示にする。
+pub fn display_path(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else {
+        path.trim_start_matches(r"\\?\").to_string()
+    }
+}
+
 #[cfg(not(windows))]
 fn current_uid() -> u32 {
     // std だけで uid を得る（/proc/self に依存しない）
@@ -600,5 +610,17 @@ mod tests {
             home.join("SDBackupStaging")
         );
         assert_eq!(expand_tilde("/abs"), PathBuf::from("/abs"));
+    }
+
+    #[test]
+    fn windows_internal_paths_are_readable_and_keep_unc_roots() {
+        assert_eq!(
+            display_path(Path::new(r"\\?\C:\Users\Taro\SDBackupStaging")),
+            r"C:\Users\Taro\SDBackupStaging"
+        );
+        assert_eq!(
+            display_path(Path::new(r"\\?\UNC\server\share\backup")),
+            r"\\server\share\backup"
+        );
     }
 }

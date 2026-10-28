@@ -129,7 +129,7 @@ pub fn build(shared: &Shared) -> Snapshot {
         waiting,
         nas,
         ssd: CapacityView {
-            path: shared.staging.root().display().to_string(),
+            path: backup_config::display_path(shared.staging.root()),
             free_bytes: rt.ssd_space.map(|s| s.free_bytes),
             total_bytes: rt.ssd_space.map(|s| s.total_bytes),
             reserve_bytes: cfg.reserve_free_bytes,

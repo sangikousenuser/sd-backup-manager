@@ -61,10 +61,10 @@ fn migrations_apply_and_are_idempotent() {
     let path = dir.path().join("state.sqlite");
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 1);
+        assert_eq!(db.schema_version().unwrap(), 2);
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 1);
+    assert_eq!(db.schema_version().unwrap(), 2);
     assert_eq!(db.quick_check().unwrap(), "ok");
 }
 
@@ -80,6 +80,64 @@ fn folder_names_are_unique_within_same_second() {
     assert_eq!(s1.folder_name, "2026101509321501");
     assert_eq!(s2.folder_name, "2026101509321502");
     assert_ne!(s1.session_id, s2.session_id);
+}
+
+#[test]
+fn card_numbers_survive_native_reformat_but_usb_readers_are_not_card_ids() {
+    let db = Db::open_in_memory().unwrap();
+    let mut before = media("before-format");
+    let mut after = media("after-format");
+    assert!(
+        before.stable_card_key().is_none(),
+        "USB リーダーのシリアルを使わない"
+    );
+    let a = db.upsert_device(&before, Confidence::High).unwrap();
+    let first = db.assign_card(&a.device_id, None, None).unwrap();
+    assert_eq!(first, "sd1");
+    let b = db.upsert_device(&after, Confidence::High).unwrap();
+    assert_ne!(a.device_id, b.device_id);
+    assert!(db.known_card(&b.device_id, None).unwrap().is_none());
+    assert_eq!(db.assign_card(&b.device_id, None, None).unwrap(), "sd2");
+
+    before.bus = Some("sd".into());
+    after.bus = Some("sd".into());
+    let key = before.stable_card_key().unwrap();
+    assert_eq!(after.stable_card_key().as_deref(), Some(key.as_str()));
+    // 別DBでネイティブSD接続を模擬。
+    let db = Db::open_in_memory().unwrap();
+    let a = db.upsert_device(&before, Confidence::High).unwrap();
+    let first = db.assign_card(&a.device_id, None, Some(&key)).unwrap();
+    let b = db.upsert_device(&after, Confidence::High).unwrap();
+    assert_eq!(
+        db.known_card(&b.device_id, Some(&key)).unwrap(),
+        Some(first)
+    );
+    assert!(db.find_resumable_session(&b.device_id).unwrap().is_none());
+}
+
+#[test]
+fn card_sessions_use_fourteen_digits_and_resolve_same_second_collisions() {
+    let (db, device_id, _, legacy) = setup();
+    let card = db.assign_card(&device_id, None, None).unwrap();
+    let now = chrono::Utc
+        .with_ymd_and_hms(2026, 10, 28, 2, 28, 34)
+        .unwrap();
+    let first = db
+        .create_card_session(&device_id, &card, Confidence::High, now, "Asia/Tokyo")
+        .unwrap();
+    let second = db
+        .create_card_session(&device_id, &card, Confidence::High, now, "Asia/Tokyo")
+        .unwrap();
+    assert_eq!(first.folder_name, "sd1/20261028112834");
+    assert_eq!(second.folder_name, "sd1/2026102811283401");
+    assert_eq!(
+        db.get_session(&legacy.session_id)
+            .unwrap()
+            .unwrap()
+            .folder_name,
+        legacy.folder_name
+    );
+    assert_eq!(db.card_names().unwrap(), vec!["sd1"]);
 }
 
 #[test]

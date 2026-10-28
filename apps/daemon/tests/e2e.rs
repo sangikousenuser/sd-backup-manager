@@ -210,19 +210,20 @@ async fn happy_path_copies_verifies_transfers_and_cleans_up() {
     .await;
 
     let s = shared.db().get_session(&sid).unwrap().unwrap();
-    assert_eq!(s.folder_name.len(), 16);
-    assert!(s.folder_name.bytes().all(|b| b.is_ascii_digit()));
+    assert!(s.folder_name.starts_with("sd1/"));
+    assert_eq!(s.folder_name[4..].len(), 14);
+    assert!(backup_core::session::is_valid_folder_name(&s.folder_name));
     let nas_session = e.nas.join(&s.folder_name);
     let files = find_files(&nas_session);
     assert!(
-        files.contains(&"Photos/P01/DCIM/100MSDCF/DSC0001.JPG".to_string()),
+        files.contains(&"P01/DCIM/100MSDCF/DSC0001.JPG".to_string()),
         "{files:?}"
     );
-    assert!(files.contains(&"Photos/P01/DCIM/100MSDCF/DSC0001.ARW".to_string()));
-    assert!(files.contains(&"Videos/P01/PRIVATE/M4ROOT/CLIP/C0001.MP4".to_string()));
-    assert!(files.contains(&"Videos/P01/PRIVATE/M4ROOT/CLIP/C0001M01.XML".to_string()));
-    assert!(files.contains(&"Other/P01/README.TXT".to_string()));
-    assert!(files.contains(&"Other/P02/DATA/notes.xyz".to_string()));
+    assert!(files.contains(&"P01/DCIM/100MSDCF/DSC0001.ARW".to_string()));
+    assert!(files.contains(&"P01/PRIVATE/M4ROOT/CLIP/C0001.MP4".to_string()));
+    assert!(files.contains(&"P01/PRIVATE/M4ROOT/CLIP/C0001M01.XML".to_string()));
+    assert!(files.contains(&"P01/README.TXT".to_string()));
+    assert!(files.contains(&"P02/DATA/notes.xyz".to_string()));
     assert!(files.contains(&"manifest.json".to_string()));
     let cs = case_sensitive(&e.base);
     // 大文字小文字の衝突はサフィックスで回避（上書きしない）
@@ -233,7 +234,7 @@ async fn happy_path_copies_verifies_transfers_and_cleans_up() {
         );
     }
     assert_eq!(
-        fs::read(nas_session.join("Videos/P01/PRIVATE/M4ROOT/CLIP/C0001.MP4")).unwrap(),
+        fs::read(nas_session.join("P01/PRIVATE/M4ROOT/CLIP/C0001.MP4")).unwrap(),
         vec![7u8; 2_000_000]
     );
     assert!(!files.iter().any(|f| f.contains(".sdbm-tmp-")));
@@ -252,7 +253,7 @@ async fn happy_path_copies_verifies_transfers_and_cleans_up() {
     assert_eq!(m.partitions.len(), 2);
 
     // SSD のセッションデータは削除済み、DB とカタログは保持
-    assert!(!e.staging.join("sessions").join(&sid).exists());
+    assert!(!shared.staging.session_dir(&sid).unwrap().exists());
     assert!(shared.db().catalog_count().unwrap() >= 6);
     // 元メディアは変更されていない
     assert_eq!(
@@ -326,8 +327,8 @@ async fn nas_offline_keeps_staging_and_reinsert_after_completion_creates_new_fol
     assert!(
         e.staging
             .join("sessions")
-            .join(&sid)
-            .join("Videos/P01/PRIVATE/M4ROOT/CLIP/C0001.MP4")
+            .join(&shared.db().get_session(&sid).unwrap().unwrap().folder_name)
+            .join("P01/PRIVATE/M4ROOT/CLIP/C0001.MP4")
             .exists()
     );
     assert!(!shared.rt().nas.connected);
@@ -393,42 +394,22 @@ async fn nas_offline_keeps_staging_and_reinsert_after_completion_creates_new_fol
         .collect();
     let expected = if case_sensitive(&e.base) { 7 } else { 6 };
     assert_eq!(
-        skipped,
-        expected - 1,
-        "previously verified, unchanged files are referenced, not re-copied"
+        skipped, 0,
+        "毎回の日時フォルダに全ファイルを実体として保存する"
     );
-    let mut copied_paths: Vec<_> = copied.iter().map(|f| f.source_rel_path.as_str()).collect();
-    copied_paths.sort();
-    assert_eq!(
-        copied_paths,
-        vec!["DCIM/100MSDCF/DSC0002.JPG", "README.TXT"]
-    );
+    assert_eq!(copied.len(), expected + 1);
     let nas_files = find_files(&offline_nas.join(&s2.folder_name));
+    assert_eq!(nas_files.len(), expected + 2); // 全ファイル + manifest
+    assert!(nas_files.contains(&"P01/PRIVATE/M4ROOT/CLIP/C0001.MP4".into()));
     assert_eq!(
-        nas_files,
-        vec![
-            "Other/P01/README.TXT".to_string(),
-            "Photos/P01/DCIM/100MSDCF/DSC0002.JPG".to_string(),
-            "manifest.json".to_string()
-        ]
-    );
-    assert_eq!(
-        fs::read(
-            offline_nas
-                .join(&s2.folder_name)
-                .join("Other/P01/README.TXT")
-        )
-        .unwrap(),
+        fs::read(offline_nas.join(&s2.folder_name).join("P01/README.TXT")).unwrap(),
         b"HELLO"
     );
     let m = backup_core::manifest::Manifest::parse_and_validate(
         &fs::read(offline_nas.join(&s2.folder_name).join("manifest.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        m.files.iter().filter(|f| f.reference.is_some()).count(),
-        expected - 1
-    );
+    assert_eq!(m.files.iter().filter(|f| f.reference.is_some()).count(), 0);
     shutdown(shared, token).await;
 }
 
@@ -498,8 +479,8 @@ async fn unreadable_file_turns_yellow_and_blocks_cleanup() {
     assert!(
         e.staging
             .join("sessions")
-            .join(&sid)
-            .join("Photos/P01/DCIM/100/OK.JPG")
+            .join(&shared.db().get_session(&sid).unwrap().unwrap().folder_name)
+            .join("DCIM/100/OK.JPG")
             .exists()
     );
     fs::set_permissions(
@@ -693,4 +674,173 @@ async fn cloned_identity_is_ambiguous_and_never_merged() {
         "{conf:?}"
     );
     shutdown(shared, token).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn whole_card_preserves_unknown_files_empty_folders_and_reserved_source_names() {
+    let e = env();
+    let token = CancellationToken::new();
+    let shared = start(
+        options(
+            &e,
+            Overrides {
+                nas_local_dir: Some(e.nas.clone()),
+                ..Default::default()
+            },
+        ),
+        token.clone(),
+    )
+    .await
+    .unwrap();
+    let card = e.base.join("card-building");
+    write(
+        &card.join("media.toml"),
+        b"serial = \"reader\"\nfs_uuid = \"whole-card\"\n",
+    );
+    write(&card.join("p1/DCIM/100/PHOTO.JPG"), b"photo");
+    write(&card.join("p1/PRIVATE/CLIP.MP4"), b"video");
+    write(&card.join("p1/unknown.bin"), b"unknown");
+    write(&card.join("p1/manifest.json"), b"original manifest");
+    write(
+        &card.join("p1/.partial/keep.txt"),
+        b"original partial directory",
+    );
+    write(
+        &card.join("p1/.sdbm-tmp-original.part"),
+        b"original temp name",
+    );
+    fs::create_dir_all(card.join("p1/EMPTY/CHILD")).unwrap();
+    rename_retry(&card, e.media.join("whole")).unwrap();
+    wait_until(
+        "complete whole-card snapshot",
+        Duration::from_secs(30),
+        || {
+            session_of_slot(&shared, 0)
+                .is_some_and(|sid| session_state(&shared, &sid) == SessionState::Complete)
+        },
+    )
+    .await;
+    let sid = session_of_slot(&shared, 0).unwrap();
+    let s = shared.db().get_session(&sid).unwrap().unwrap();
+    let root = e.nas.join(&s.folder_name);
+    assert!(root.join("DCIM/100/PHOTO.JPG").exists());
+    assert!(root.join("PRIVATE/CLIP.MP4").exists());
+    assert_eq!(fs::read(root.join("unknown.bin")).unwrap(), b"unknown");
+    assert_eq!(
+        fs::read(root.join("manifest~2.json")).unwrap(),
+        b"original manifest"
+    );
+    assert_eq!(
+        fs::read(root.join(".partial~2/keep.txt")).unwrap(),
+        b"original partial directory"
+    );
+    assert_eq!(
+        fs::read(root.join("_.sdbm-tmp-original.part")).unwrap(),
+        b"original temp name"
+    );
+    assert!(root.join("EMPTY/CHILD").is_dir());
+    assert!(!root.join("Photos").exists());
+    let manifest = backup_core::manifest::Manifest::parse_and_validate(
+        &fs::read(root.join("manifest.json")).unwrap(),
+    )
+    .unwrap();
+    let restored = e.base.join("restored-whole");
+    let report =
+        backup_storage::restore::restore_layout(&manifest, &root, Some(&e.nas), &restored).unwrap();
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert!(restored.join("P01/EMPTY/CHILD").is_dir());
+    assert_eq!(
+        fs::read(restored.join("P01/manifest.json")).unwrap(),
+        b"original manifest"
+    );
+    assert_eq!(
+        fs::read(restored.join("P01/.partial/keep.txt")).unwrap(),
+        b"original partial directory"
+    );
+    shutdown(shared, token).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn formatted_cards_reuse_only_native_card_serial_and_never_resume_old_session() {
+    for (bus, expected_card) in [("usb", "sd2"), ("sd", "sd1")] {
+        let e = env();
+        let token = CancellationToken::new();
+        // NAS オフラインのまま、前回分の SSD データも維持されることを確認する。
+        let shared = start(options(&e, Overrides::default()), token.clone())
+            .await
+            .unwrap();
+        let card = e.base.join("format-card");
+        write(
+            &card.join("media.toml"),
+            format!("serial = \"fixed-serial\"\nfs_uuid = \"before\"\nbus = \"{bus}\"\n")
+                .as_bytes(),
+        );
+        write(&card.join("p1/OLD.DAT"), b"old data");
+        rename_retry(&card, e.media.join("card")).unwrap();
+        wait_until("first card green", Duration::from_secs(20), || {
+            slot_phase(&shared, 0) == Some(SlotPhase::DoneGreen)
+        })
+        .await;
+        let first_sid = session_of_slot(&shared, 0).unwrap();
+        let first_folder = shared
+            .db()
+            .get_session(&first_sid)
+            .unwrap()
+            .unwrap()
+            .folder_name;
+        assert!(first_folder.starts_with("sd1/"));
+        rename_retry(e.media.join("card"), &card).unwrap();
+        wait_until("removed before format", Duration::from_secs(10), || {
+            slot_phase(&shared, 0).is_none()
+        })
+        .await;
+        fs::remove_file(card.join("p1/OLD.DAT")).unwrap();
+        write(
+            &card.join("media.toml"),
+            format!("serial = \"fixed-serial\"\nfs_uuid = \"after\"\nbus = \"{bus}\"\n").as_bytes(),
+        );
+        write(&card.join("p1/NEW.DAT"), b"new data");
+        rename_retry(&card, e.media.join("card")).unwrap();
+        wait_until("formatted card green", Duration::from_secs(20), || {
+            slot_phase(&shared, 0) == Some(SlotPhase::DoneGreen)
+        })
+        .await;
+        let second_sid = session_of_slot(&shared, 0).unwrap();
+        let second = shared.db().get_session(&second_sid).unwrap().unwrap();
+        assert_ne!(first_sid, second_sid);
+        assert_ne!(first_folder, second.folder_name);
+        assert!(
+            second.folder_name.starts_with(&format!("{expected_card}/")),
+            "{bus}: {}",
+            second.folder_name
+        );
+        assert_eq!(
+            fs::read(
+                e.staging
+                    .join("sessions")
+                    .join(first_folder)
+                    .join("OLD.DAT")
+            )
+            .unwrap(),
+            b"old data"
+        );
+        assert_eq!(
+            fs::read(
+                e.staging
+                    .join("sessions")
+                    .join(&second.folder_name)
+                    .join("NEW.DAT")
+            )
+            .unwrap(),
+            b"new data"
+        );
+        assert!(
+            !e.staging
+                .join("sessions")
+                .join(second.folder_name)
+                .join("OLD.DAT")
+                .exists()
+        );
+        shutdown(shared, token).await;
+    }
 }

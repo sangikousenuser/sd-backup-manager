@@ -150,8 +150,13 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .spacing(8);
 
     let info = column![
-        text("保存先・安全設定（変更不可）").size(18),
-        labeled("SSD 一時保存先", s.staging_directory.clone()),
+        text("保存先・安全設定").size(18),
+        labeled("SSD 一時保存先", app.snapshot.as_ref().map(|s| s.ssd.path.clone()).unwrap_or_else(|| backup_config::display_path(&backup_config::expand_tilde(&s.staging_directory)))),
+        button(text("PC 内の保存先を開く")).on_press(Message::OpenFolder(
+            app.snapshot.as_ref().map(|s| s.ssd.path.clone()).unwrap_or_else(|| backup_config::expand_tilde(&s.staging_directory).display().to_string())
+        )).style(button::secondary),
+        text("通常の Windows 保存先: C:\\Users\\ユーザー名\\SDBackupStaging\\sessions\\sd1\\日時\\").size(12),
+        text("NAS の検証完了後に PC 内の一時データを自動削除します。保存先・最低空き容量・同時処理数は変更できません。").size(12).color(theme::GRAY),
         labeled(
             "最低確保空き容量",
             format!("{}（10 進表記）", format_bytes(s.reserve_free_bytes))

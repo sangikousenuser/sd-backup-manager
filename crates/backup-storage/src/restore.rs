@@ -52,6 +52,14 @@ pub fn restore_layout(
     fs::create_dir_all(&partial_dir)?;
 
     let mut report = RestoreReport::default();
+    for p in &manifest.partitions {
+        fs::create_dir_all(dest.join(partition_label(p.index)))?;
+    }
+    for d in &manifest.directories {
+        let target = restore_target(&dest, d.partition_index, &d.source_rel_path, None)
+            .map_err(io::Error::other)?;
+        fs::create_dir_all(target)?;
+    }
     for f in &manifest.files {
         let result = (|| -> Result<Outcome, String> {
             let src = match f.status {
@@ -172,6 +180,7 @@ mod tests {
 
     fn manifest(files: Vec<ManifestFile>) -> Manifest {
         Manifest {
+            directories: Vec::new(),
             schema_version: 1,
             app_version: "t".into(),
             session_id: "s".into(),

@@ -92,6 +92,27 @@ pub struct MediaDescriptor {
 }
 
 impl MediaDescriptor {
+    /// ネイティブ SD/MMC 接続で得られたシリアルだけをフォーマット非依存の候補にする。
+    /// USB はリーダー自身のシリアルの可能性があるため絶対に代用しない。
+    pub fn stable_card_key(&self) -> Option<String> {
+        if !matches!(self.bus.as_deref(), Some("sd" | "mmc")) || norm(&self.serial).is_empty() {
+            return None;
+        }
+        Some(
+            blake3::hash(
+                format!(
+                    "sdbm-card-v1\x1f{}\x1f{}\x1f{}",
+                    norm(&self.vendor),
+                    norm(&self.model),
+                    norm(&self.serial)
+                )
+                .as_bytes(),
+            )
+            .to_hex()
+            .to_string(),
+        )
+    }
+
     /// 表示用の名前（例: "SanDisk Extreme (128.0GB)"）。
     pub fn display_name(&self) -> String {
         let mut name = [self.vendor.as_deref(), self.model.as_deref()]

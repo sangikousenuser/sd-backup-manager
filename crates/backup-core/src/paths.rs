@@ -65,6 +65,9 @@ pub fn sanitize_component(name: &str) -> String {
     if RESERVED_NAMES.contains(&stem_upper.as_str()) {
         out.insert(0, '_');
     }
+    if out.starts_with(".sdbm-tmp-") || out.starts_with(".sdbm-old-") {
+        out.insert(0, '_');
+    }
     out
 }
 
@@ -90,6 +93,29 @@ impl DestinationAllocator {
     /// 既に割り当て済みのパス（再開時の DB 内容）を登録する。
     pub fn register_existing(&mut self, dest: &str) {
         self.insert(dest);
+    }
+
+    pub fn allocate_directory(&mut self, prefix: &str, components: &[String]) -> String {
+        let mut current = prefix.trim_matches('/').to_string();
+        for comp in components {
+            let comp = sanitize_component(comp);
+            let wanted = join(&current, &comp);
+            let key = collision_key(&wanted);
+            if let Some(mapped) = self.dir_map.get(&key) {
+                current = mapped.clone();
+                continue;
+            }
+            let mut chosen = wanted;
+            let mut n = 2;
+            while self.files.contains(&collision_key(&chosen)) {
+                chosen = join(&current, &with_suffix(&comp, n));
+                n += 1;
+            }
+            self.dir_map.insert(key, chosen.clone());
+            self.dirs.insert(collision_key(&chosen));
+            current = chosen;
+        }
+        current
     }
 
     /// `prefix`（例 `Photos/P01`）と元の相対パス要素から格納パスを決める。

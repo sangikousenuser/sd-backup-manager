@@ -13,6 +13,11 @@ use std::time::Duration;
 
 pub fn recover(shared: &Shared) -> anyhow::Result<()> {
     let report = shared.db().recover_after_restart()?;
+    for s in shared.db().sessions_in_states(SessionState::ALL)? {
+        shared
+            .staging
+            .register_session(&s.session_id, &s.folder_name)?;
+    }
     let partials = shared.staging.clear_partials()?;
 
     let mut missing = 0usize;

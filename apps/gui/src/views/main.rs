@@ -33,11 +33,23 @@ pub fn view(app: &App) -> Element<'_, Message> {
         );
     }
     col = col.push(nas_card(snap));
+    col = col.push(
+        column![
+            text(format!("PC 内の一時保存先: {}", snap.ssd.path)).size(13),
+            button(text("PC 内の保存先を開く"))
+                .on_press(Message::OpenFolder(snap.ssd.path.clone()))
+                .style(button::secondary),
+            text("NAS で全内容の検証が完了すると、PC 内の一時データは自動削除されます。")
+                .size(12)
+                .color(theme::GRAY),
+        ]
+        .spacing(4),
+    );
     for warn in &snap.warnings {
         col = col.push(text(format!("▲ {warn}")).color(theme::YELLOW));
     }
     col = col.push(
-        text("※ 未知の形式を含むすべてのファイルを保存します（写真・動画以外は Other/ に入ります）。元メディアには書き込みません。")
+        text("※ SD の全ファイルとフォルダ構成を sd番号/日時/ に保存します。元メディアには書き込みません。")
             .size(12)
             .color(theme::GRAY),
     );

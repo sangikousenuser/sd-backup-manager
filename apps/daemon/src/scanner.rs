@@ -26,6 +26,7 @@ pub struct ScannedFile {
 #[derive(Debug, Default)]
 pub struct ScanResult {
     pub files: Vec<ScannedFile>,
+    pub directories: Vec<(u32, Vec<String>)>,
     /// 取り込まない特殊ファイル等（情報）。
     pub warnings: Vec<String>,
     /// 読めなかったディレクトリ等（取りこぼしの可能性 → 全件成功とは表示しない）。
@@ -58,7 +59,16 @@ pub fn scan_partition(root: &Path, index: u32, cancel: &CancellationToken) -> Sc
                 continue;
             }
         };
-        let mut children: Vec<_> = entries.flatten().collect();
+        let mut children = Vec::new();
+        for entry in entries {
+            match entry {
+                Ok(entry) => children.push(entry),
+                Err(e) => result.errors.push(format!(
+                    "フォルダ内の項目を読み込めません ({}): {e}",
+                    display_or_root(&prefix)
+                )),
+            }
+        }
         children.sort_by_key(|e| e.file_name());
         for entry in children {
             let name = entry.file_name();
@@ -81,6 +91,13 @@ pub fn scan_partition(root: &Path, index: u32, cancel: &CancellationToken) -> Sc
                     display(&comps)
                 ));
             } else if ft.is_dir() {
+                result.directories.push((
+                    index,
+                    comps
+                        .iter()
+                        .map(|c| String::from_utf8_lossy(c).replace('/', "_"))
+                        .collect(),
+                ));
                 stack.push((path, comps));
             } else if ft.is_file() {
                 if result.files.len() >= MAX_FILES {
@@ -119,6 +136,7 @@ pub fn scan_partition(root: &Path, index: u32, cancel: &CancellationToken) -> Sc
         }
     }
     result.files.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    result.directories.sort_by(|a, b| a.1.cmp(&b.1));
     result
 }
 

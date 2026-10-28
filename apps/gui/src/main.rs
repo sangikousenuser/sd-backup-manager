@@ -9,6 +9,7 @@
 mod app;
 mod fonts;
 mod ipc;
+mod platform;
 mod sound;
 mod theme;
 mod views;

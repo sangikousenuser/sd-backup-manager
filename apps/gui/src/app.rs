@@ -19,6 +19,8 @@ pub enum Message {
     Daemon(DaemonEvent),
     Navigate(Screen),
     Run(Command),
+    OpenFolder(String),
+    FolderOpened(Result<(), String>),
     CommandDone(Result<Response, String>),
     // 履歴
     HistoryLoaded(Result<Response, String>, Result<Response, String>),
@@ -71,7 +73,7 @@ pub struct App {
 
 impl App {
     pub fn new() -> (Self, Task<Message>) {
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = backup_config::home_dir();
         let app = Self {
             screen: Screen::Main,
             snapshot: None,
@@ -83,8 +85,8 @@ impl App {
             events: Vec::new(),
             selected_session: None,
             files: Vec::new(),
-            restore_dest: format!("{home}/SDRestore"),
-            export_dir: format!("{home}/Desktop"),
+            restore_dest: home.join("SDRestore").display().to_string(),
+            export_dir: home.join("Desktop").display().to_string(),
             settings: SettingsView::default(),
             settings_loaded: false,
             password: String::new(),
@@ -140,6 +142,17 @@ impl App {
             Message::Run(command) => {
                 self.busy = true;
                 return Task::perform(ipc::send(command), Message::CommandDone);
+            }
+            Message::OpenFolder(path) => {
+                return Task::perform(
+                    async move { crate::platform::open_folder(&path) },
+                    Message::FolderOpened,
+                );
+            }
+            Message::FolderOpened(result) => {
+                if let Err(e) = result {
+                    self.toast = Some((false, e));
+                }
             }
             Message::CommandDone(result) => {
                 self.busy = false;

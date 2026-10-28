@@ -238,7 +238,29 @@ impl NasRoot {
         for c in comps {
             p.push(c);
         }
+        let mut current = self.root.clone();
+        for component in p
+            .strip_prefix(&self.root)
+            .map_err(|_| NasError::InvalidPath(dest_rel.into()))?
+        {
+            current.push(component);
+            if fs::symlink_metadata(&current).is_ok_and(|m| crate::platform::is_link_like(&m)) {
+                return Err(NasError::InvalidPath(current.display().to_string()));
+            }
+        }
         Ok(p)
+    }
+
+    pub fn ensure_directory(&self, folder: &str, dest_rel: &str) -> Result<(), NasError> {
+        let path = self.final_path(folder, dest_rel)?;
+        fs::create_dir_all(&path).map_err(NasError::from_io)?;
+        if !fs::symlink_metadata(&path)
+            .map_err(NasError::from_io)?
+            .is_dir()
+        {
+            return Err(NasError::InvalidPath(dest_rel.into()));
+        }
+        Ok(())
     }
 
     /// NAS 上の実体を全読み込みしてハッシュ照合する。存在しなければ Ok(false)。

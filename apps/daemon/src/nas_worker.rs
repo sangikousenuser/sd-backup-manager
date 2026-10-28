@@ -338,6 +338,18 @@ async fn finalize_session(
     let sid = &s.session_id;
     let files = shared.db().files_for_session(sid)?;
     let pending = shared.db().pending_transfer_count(sid)?;
+    if backup_core::session::is_card_folder(&s.folder_name) {
+        let partitions = shared.db().partition_details(&s.device_id)?;
+        if partitions.len() > 1 {
+            for p in partitions {
+                nas.ensure_directory(&s.folder_name, &backup_core::partition_label(p.0))?;
+            }
+        }
+    }
+    // 再起動後の完了処理でも空フォルダを含めて存在を確認する。
+    for (_, _, dest) in shared.db().directories(sid)? {
+        nas.ensure_directory(&s.folder_name, &dest)?;
+    }
 
     if s.state == SessionState::NasPending {
         // すべてのファイルが SSD 検証済み + NAS 検証済み（またはスキップ参照検証済み）か
@@ -543,6 +555,18 @@ pub fn build_manifest(
     let partitions = db.partition_details(&s.device_id)?;
     drop(db);
     Ok(Manifest {
+        directories: shared
+            .db()
+            .directories(&s.session_id)?
+            .into_iter()
+            .map(|(partition_index, source_rel_path, dest_rel_path)| {
+                backup_core::manifest::ManifestDirectory {
+                    partition_index,
+                    source_rel_path,
+                    dest_rel_path,
+                }
+            })
+            .collect(),
         schema_version: MANIFEST_SCHEMA_VERSION,
         app_version: backup_core::APP_VERSION.into(),
         session_id: s.session_id.clone(),

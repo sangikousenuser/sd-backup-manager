@@ -16,6 +16,22 @@ pub fn view(app: &App, slot: usize) -> Element<'_, Message> {
             .into();
     };
     let d = &s.details;
+    let local_dir = app
+        .snapshot
+        .as_ref()
+        .zip(s.session_id.as_ref())
+        .map(|(snap, sid)| {
+            let folder = s
+                .folder_name
+                .as_deref()
+                .filter(|f| backup_core::session::is_card_folder(f))
+                .unwrap_or(sid);
+            std::path::Path::new(&snap.ssd.path)
+                .join("sessions")
+                .join(folder)
+                .display()
+                .to_string()
+        });
     let mut col = column![
         back,
         text(format!("メディア {} の詳細", slot + 1)).size(20),
@@ -47,6 +63,13 @@ pub fn view(app: &App, slot: usize) -> Element<'_, Message> {
         ),
     ]
     .spacing(6);
+    if let Some(path) = local_dir {
+        col = col.push(labeled("PC 内の保存場所", path.clone())).push(
+            button(text("この保存先を開く"))
+                .on_press(Message::OpenFolder(path))
+                .style(button::secondary),
+        );
+    }
     col = col.push(text("パーティション").size(16));
     for p in &d.partitions {
         col = col.push(text(format!("・{p}")));

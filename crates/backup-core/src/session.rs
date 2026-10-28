@@ -1,7 +1,7 @@
 //! セッションの日時フォルダ名（4.2）。
 //!
-//! `YYYYMMDDHHMMSSNN`（ローカル時刻、ASCII 数字のみ）。`NN` は同一秒衝突回避用の
-//! 00〜99 の連番で、100 件以上はさらに桁を増やす。一意性は DB の UNIQUE 制約で担保する。
+//! 新規は `sdN/YYYYMMDDHHMMSS`（ローカル時刻）。同一秒の衝突時のみ連番を追加する。
+//! 旧形式 `YYYYMMDDHHMMSSNN` も再開・参照用に受け付ける。一意性は DB で担保する。
 
 use chrono::{DateTime, TimeZone, Utc};
 use chrono_tz::Tz;
@@ -29,9 +29,25 @@ pub fn folder_candidate(base: &str, n: u32) -> String {
     }
 }
 
-/// フォルダ名として妥当か（数字のみ・16 桁以上）。NAS 削除等の境界確認に使う。
+/// `sdN/日時` または旧形式の数字のみ16桁以上。NAS 操作の境界確認に使う。
 pub fn is_valid_folder_name(name: &str) -> bool {
+    if let Some((card, time)) = name.split_once('/') {
+        return is_valid_card_name(card)
+            && time.len() >= 14
+            && time.bytes().all(|b| b.is_ascii_digit());
+    }
     name.len() >= 16 && name.bytes().all(|b| b.is_ascii_digit())
+}
+
+pub fn is_valid_card_name(name: &str) -> bool {
+    name.strip_prefix("sd").is_some_and(|n| {
+        !n.is_empty() && !n.starts_with('0') && n.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
+/// 新方式のセッションは分類・過去ファイル参照を行わず、毎回全内容を保存する。
+pub fn is_card_folder(name: &str) -> bool {
+    name.contains('/') && is_valid_folder_name(name)
 }
 
 /// UUIDv7 のセッション ID。
@@ -70,6 +86,24 @@ mod tests {
         assert!(is_valid_session_id(&id));
         assert!(!is_valid_session_id("../x"));
         assert!(!is_valid_session_id(""));
+    }
+
+    #[test]
+    fn card_folders_are_bounded_and_legacy_names_remain_valid() {
+        assert!(is_card_folder("sd1/20261028112834"));
+        assert!(is_card_folder("sd12/2026102811283401"));
+        assert!(is_valid_folder_name("2026101509321501"));
+        for name in [
+            "../20261028112834",
+            "sd0/20261028112834",
+            "sd01/20261028112834",
+            "sd1/../20261028112834",
+            "sd1\\20261028112834",
+            "sd1/20261028112834/x",
+            "sd1/2026102811283",
+        ] {
+            assert!(!is_valid_folder_name(name), "{name}");
+        }
     }
 
     #[test]

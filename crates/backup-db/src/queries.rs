@@ -125,6 +125,123 @@ fn new_id() -> String {
 }
 
 impl Db {
+    pub fn card_names(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT card_id FROM cards ORDER BY card_id")?;
+        Ok(stmt
+            .query_map([], |r| Ok(format!("sd{}", r.get::<_, i64>(0)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn known_card(&self, device_id: &str, stable_key: Option<&str>) -> Result<Option<String>> {
+        let id: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT card_id FROM device_cards WHERE device_id = ?1",
+                [device_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let id = match id {
+            Some(id) => Some(id),
+            None => match stable_key {
+                Some(key) => self
+                    .conn
+                    .query_row(
+                        "SELECT card_id FROM cards WHERE stable_key = ?1",
+                        [key],
+                        |r| r.get(0),
+                    )
+                    .optional()?,
+                None => None,
+            },
+        };
+        Ok(id.map(|id| format!("sd{id}")))
+    }
+
+    /// 保存先だけを紐付ける。device_id やパーティション指紋は変更しない。
+    pub fn assign_card(
+        &self,
+        device_id: &str,
+        name: Option<&str>,
+        stable_key: Option<&str>,
+    ) -> Result<String> {
+        let tx = self.conn.unchecked_transaction()?;
+        let id = match name {
+            Some(name) => {
+                if !backup_core::session::is_valid_card_name(name) {
+                    return Err(DbError::Corrupt("カード名が不正です".into()));
+                }
+                let id: i64 = name[2..]
+                    .parse()
+                    .map_err(|_| DbError::Corrupt("カード番号が不正です".into()))?;
+                tx.query_row("SELECT card_id FROM cards WHERE card_id = ?1", [id], |r| {
+                    r.get::<_, i64>(0)
+                })?
+            }
+            None => {
+                tx.execute("INSERT INTO cards(stable_key) VALUES(?1)", [stable_key])?;
+                tx.last_insert_rowid()
+            }
+        };
+        tx.execute("INSERT INTO device_cards(device_id, card_id) VALUES(?1, ?2) ON CONFLICT(device_id) DO UPDATE SET card_id = excluded.card_id", params![device_id, id])?;
+        tx.commit()?;
+        Ok(format!("sd{id}"))
+    }
+
+    /// 旧セッションの日時フォルダには触れず、新規だけ sdN/日時 にする。
+    pub fn create_card_session(
+        &self,
+        device_id: &str,
+        card: &str,
+        confidence: Confidence,
+        now: chrono::DateTime<chrono::Utc>,
+        timezone: &str,
+    ) -> Result<SessionRow> {
+        if !backup_core::session::is_valid_card_name(card) {
+            return Err(DbError::Corrupt("カード名が不正です".into()));
+        }
+        let base = folder_base(now, parse_timezone(timezone));
+        let sid = new_session_id();
+        let started = crate::to_db_time(now);
+        for n in 0..10_000u32 {
+            let time = if n == 0 {
+                base.clone()
+            } else {
+                folder_candidate(&base, n)
+            };
+            let folder = format!("{card}/{time}");
+            match self.conn.execute(
+                "INSERT INTO sessions(session_id, device_id, folder_name, started_at_utc, local_timezone, identity_confidence, state, media_state, nas_state, updated_at_utc) VALUES(?1, ?2, ?3, ?4, ?5, ?6, 'DETECTED', 'DETECTED', 'WAITING', ?4)",
+                params![sid, device_id, folder, started, timezone, confidence.as_str()],
+            ) {
+                Ok(_) => return self.get_session(&sid)?.ok_or(DbError::NotFound(sid)),
+                Err(rusqlite::Error::SqliteFailure(e, _)) if e.extended_code == 2067 => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(DbError::Corrupt("日時フォルダを確保できません".into()))
+    }
+
+    pub fn save_directory(
+        &self,
+        sid: &str,
+        partition: u32,
+        source: &str,
+        dest: &str,
+    ) -> Result<()> {
+        self.conn.execute("INSERT OR IGNORE INTO session_directories(session_id, partition_index, source_rel_path, destination_rel_path) VALUES(?1, ?2, ?3, ?4)", params![sid, partition, source, dest])?;
+        Ok(())
+    }
+
+    pub fn directories(&self, sid: &str) -> Result<Vec<(u32, String, String)>> {
+        let mut stmt = self.conn.prepare("SELECT partition_index, source_rel_path, destination_rel_path FROM session_directories WHERE session_id = ?1 ORDER BY source_rel_path")?;
+        Ok(stmt
+            .query_map([sid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     // ------------------------------------------------------------------
     // devices / partitions
     // ------------------------------------------------------------------

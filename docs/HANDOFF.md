@@ -1,6 +1,6 @@
 # 引き継ぎ資料（Windows で開発を続ける人・AI 向け）
 
-最終更新: 2026-10-27。このファイルと [CLAUDE.md](../CLAUDE.md) を読めば、Windows 端末上で
+最終更新: 2026-10-28。このファイルと [CLAUDE.md](../CLAUDE.md) を読めば、Windows 端末上で
 開発を再開できるようにまとめています。仕様の正本は
 [SD_Backup_Manager_Requirements_v1.0.md](SD_Backup_Manager_Requirements_v1.0.md)（Ubuntu 前提で書かれている。
 Windows での読み替えは [windows.md](windows.md)）。
@@ -8,6 +8,12 @@ Windows での読み替えは [windows.md](windows.md)）。
 ---
 
 ## 1. 現在の状態
+
+未リリース変更（2026-10-28）: 新規セッションは SSD/NAS とも `sdN/14桁日時/` に元の全構成を保存し、
+毎回全ファイルをコピーする。複数パーティションは `P01/` 等で区別し、空フォルダも DB/manifest に記録する。
+カード番号の永続化は `migrations/0002_cards.sql`。旧セッションは旧パスと分類方式を維持して再開する。
+SD/MMC シリアルが取得できる場合のみフォーマット後の番号を再利用し、USB リーダー等では新番号になる。
+GUI に PC 内の保存先表示・開くボタンを追加。シミュレータで検証済み、Windows 実機・実機 SD は未検証。
 
 | 項目 | 状態 |
 |---|---|
@@ -160,7 +166,7 @@ CI（windows-latest）で確認できるのは、コンパイル・clippy・単�
 4. **ログオフ時の正常停止**: コンソールのないプロセスには Ctrl イベントが届かない。隠しウィンドウを作って
    `WM_QUERYENDSESSION` / `WM_ENDSESSION` を受け、`shutdown` をキャンセルする
 5. Windows でも途中抜去を模擬できる E2E（シミュレータに「抜去フラグ」ファイルを設ける等）
-6. GUI の表示から `\\?\` プレフィックスを除く（`dunce` クレート等）
+6. Windows の保存先表示・フォルダを開く操作の実機確認（内部の `\\?\` 表現は表示時に除去済み）
 7. アプリアイコン（.ico）、コード署名（SmartScreen 対策）
 8. `doctor` の Windows チェック拡充（AutoPlay の状態、NAS への到達性）
 

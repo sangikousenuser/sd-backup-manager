@@ -42,8 +42,13 @@ systemctl --user restart sd-backup-daemon                 # 再起動（処理�
 | `~/.config/sd-backup-manager/formats.toml` | 分類用の拡張子定義（編集してデーモン再起動で反映） |
 | `~/.local/share/sd-backup-manager/state.sqlite` | 状態 DB・永続カタログ |
 | `~/.local/share/sd-backup-manager/logs/` | 日次ログ（30 日保持） |
-| `~/SDBackupStaging/sessions/<UUID>/` | SSD 一時保存（NAS 検証後に自動削除） |
-| NAS `<共有>/<YYYYMMDDHHMMSSNN>/` | `Photos/` `Videos/` `Other/` と `manifest.json` |
+| `~/SDBackupStaging/sessions/sd1/<YYYYMMDDHHMMSS>/` | SSD 一時保存。SD の元の構成と `manifest.json`（NAS 検証後に自動削除） |
+| NAS `<共有>/sd1/<YYYYMMDDHHMMSS>/` | SD の元の構成と `manifest.json`。毎回全ファイルを保存 |
+
+Windows は `~` を `%USERPROFILE%` に読み替えます。画面の［PC 内の保存先を開く］から開けます。
+同一秒の日時には連番を追加します。複数パーティションは日時の下の `P01/`・`P02/` に分けます。
+旧セッションは SSD の `sessions/<UUID>/`、NAS の `<YYYYMMDDHHMMSSNN>/` に維持します。
+カード番号は DB に保持します。カード固有シリアルのない USB リーダーではフォーマット後に新番号になります。
 
 ## 本番前の推奨事項
 
