@@ -135,22 +135,19 @@ async fn handle_command(shared: &Arc<Shared>, command: Command) -> Result<Respon
         Command::GetFiles {
             session_id,
             only_problems,
+            offset,
+            limit,
         } => {
-            let rows = shared
+            let page = shared
                 .db()
-                .files_for_session(&session_id)
+                .files_page(&session_id, only_problems, offset, limit)
                 .map_err(|e| e.to_string())?;
             Ok(Response::Files {
-                files: rows
+                total_files: page.total,
+                files: page
+                    .files
                     .into_iter()
-                    .filter(|f| {
-                        !only_problems
-                            || !f.stage_state.is_done()
-                            || (f.stage_state == backup_core::state::StageState::SsdVerified
-                                && f.nas_state != backup_core::state::NasFileState::NasVerified)
-                    })
-                    .take(5000)
-                    .map(|f| FileSummary {
+                    .map(|(f, transfer)| FileSummary {
                         file_id: f.file_id,
                         source_rel_path: f.source_rel_path,
                         destination_rel_path: f.destination_rel_path,
@@ -159,11 +156,18 @@ async fn handle_command(shared: &Arc<Shared>, command: Command) -> Result<Respon
                         stage_state: f.stage_state.to_string(),
                         nas_state: f.nas_state.to_string(),
                         copy_attempts: f.copy_attempts,
-                        error: f.last_error,
+                        nas_attempts: transfer.attempts,
+                        next_retry_utc: transfer.next_attempt_utc,
+                        error: transfer.last_error.or(f.last_error),
                     })
                     .collect(),
             })
         }
+        Command::ManageNasFiles {
+            session_id,
+            file_ids,
+            action,
+        } => manage_nas_files(shared, session_id, file_ids, action).await,
         Command::ListEvents { days, limit } => {
             let since = backup_db::to_db_time(
                 chrono::Utc::now() - chrono::Duration::days(days.clamp(1, 30) as i64),
@@ -253,6 +257,7 @@ async fn handle_command(shared: &Arc<Shared>, command: Command) -> Result<Respon
             session_id,
             dest_dir,
         } => restore(shared, session_id, dest_dir).await,
+        Command::DiscardSession { session_id } => discard_session(shared, session_id).await,
         Command::Shutdown => {
             shared.event(None, "info", "shutdown_requested", "停止が要求されました");
             let sd = shared.shutdown.clone();
@@ -266,6 +271,281 @@ async fn handle_command(shared: &Arc<Shared>, command: Command) -> Result<Respon
             })
         }
     }
+}
+
+struct NasFileIntents {
+    shared: Arc<Shared>,
+    ids: Vec<String>,
+}
+
+impl NasFileIntents {
+    fn new(shared: &Arc<Shared>, ids: Vec<String>) -> Self {
+        {
+            let mut requested = shared
+                .nas_cancel_files
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for id in &ids {
+                *requested.entry(id.clone()).or_default() += 1;
+            }
+        }
+        Self {
+            shared: shared.clone(),
+            ids,
+        }
+    }
+}
+
+impl Drop for NasFileIntents {
+    fn drop(&mut self) {
+        let mut requested = self
+            .shared
+            .nas_cancel_files
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for id in &self.ids {
+            if let Some(count) = requested.get_mut(id) {
+                *count -= 1;
+                if *count == 0 {
+                    requested.remove(id);
+                }
+            }
+        }
+        self.shared.nas_wakeup.notify_one();
+    }
+}
+
+async fn manage_nas_files(
+    shared: &Arc<Shared>,
+    sid: String,
+    ids: Vec<String>,
+    action: backup_ipc::NasFileAction,
+) -> Result<Response, String> {
+    if ids.is_empty() || ids.len() > 1000 {
+        return Err("ファイルは 1〜1000 件を選択してください".into());
+    }
+    {
+        let db = shared.db();
+        for id in &ids {
+            let f = db
+                .get_file(id)
+                .map_err(|e| e.to_string())?
+                .ok_or("ファイルが見つかりません")?;
+            if f.stage_state == backup_core::state::StageState::Discarded {
+                return Err("PC 内のコピーは削除済みです。NAS 再試行の対象にはできません".into());
+            }
+            if f.session_id != sid
+                || !(f.stage_state == backup_core::state::StageState::SsdVerified
+                    || (action == backup_ipc::NasFileAction::DeleteLocal
+                        && f.stage_state == backup_core::state::StageState::DeletePending))
+                || f.nas_state == backup_core::state::NasFileState::NasVerified
+            {
+                return Err("別のセッションや NAS 検証済みファイルは操作できません".into());
+            }
+        }
+    }
+    // 意図を先に登録し、転送中ならチャンク境界で安全に停止させる。
+    let _intents = NasFileIntents::new(shared, ids.clone());
+    let _operation = tokio::time::timeout(std::time::Duration::from_secs(10), shared.nas_operation.lock()).await
+        .map_err(|_| "転送の停止待ちがタイムアウトしました。NAS の応答を確認して再実行してください（操作は確定していません）".to_string())?;
+    if action == backup_ipc::NasFileAction::DeleteLocal {
+        let _session_operation = shared.media_session_operation.lock().await;
+        if shared
+            .rt()
+            .slots
+            .iter()
+            .flatten()
+            .any(|s| s.session_id.as_deref() == Some(&sid) && !s.task_finished)
+        {
+            return Err("SD の取り込みが終わってから削除してください".into());
+        }
+        let files = shared
+            .db()
+            .prepare_nas_file_deletion(&sid, &ids)
+            .map_err(|e| e.to_string())?;
+        let shared2 = shared.clone();
+        let sid2 = sid.clone();
+        let (deleted, mut errors) = tokio::task::spawn_blocking(move || {
+            let mut deleted = 0;
+            let mut errors = Vec::new();
+            for file in files {
+                match crate::file_actions::finish_deletion(&shared2, &file) {
+                    Ok(()) => deleted += 1,
+                    Err(e) => errors.push(format!("{}: {e}", file.source_rel_path)),
+                }
+            }
+            if let Err(e) = crate::file_actions::refresh_manifest(&shared2, &sid2) {
+                errors.push(format!("一覧ファイルを更新できません: {e}"));
+            }
+            (deleted, errors)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        shared
+            .db()
+            .refresh_session_counters(&sid)
+            .map_err(|e| e.to_string())?;
+        shared.capacity_wakeup.notify_waiters();
+        drop(_intents);
+        let message = format!(
+            "{} 件の PC コピーと転送キューを削除しました（NAS 上のコピーは変更しません）",
+            deleted
+        );
+        shared.event(Some(&sid), "warn", "nas_files_deleted", &message);
+        if !errors.is_empty() {
+            errors.truncate(3);
+            return Err(format!(
+                "{message}。削除待ち・更新エラー: {}",
+                errors.join(" / ")
+            ));
+        }
+        return Ok(Response::Ok { message });
+    }
+    shared
+        .db()
+        .manage_nas_files(&sid, &ids, action == backup_ipc::NasFileAction::Retry)
+        .map_err(|e| e.to_string())?;
+    let message = match action {
+        backup_ipc::NasFileAction::Retry => {
+            format!("選択した {} 件の NAS 転送を再試行待ちにしました", ids.len())
+        }
+        backup_ipc::NasFileAction::Cancel => format!(
+            "選択した {} 件を転送待ちから削除しました（PC 内のコピーは保持）",
+            ids.len()
+        ),
+        backup_ipc::NasFileAction::DeleteLocal => unreachable!(),
+    };
+    drop(_intents);
+    shared.event(Some(&sid), "info", "nas_files_managed", &message);
+    Ok(Response::Ok { message })
+}
+
+async fn discard_session(shared: &Arc<Shared>, session_id: String) -> Result<Response, String> {
+    let session = shared
+        .db()
+        .get_session(&session_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "セッションが見つかりません".to_string())?;
+    if session.staging_deleted_at_utc.is_some()
+        || session.state == backup_core::state::SessionState::Complete
+    {
+        return Err("このセッションの SSD データはすでに削除済みです".into());
+    }
+    if session.state.is_media_active() {
+        return Err("メディア処理中のため削除できません。処理完了後に実行してください".into());
+    }
+    let in_slot = shared
+        .rt()
+        .slots
+        .iter()
+        .flatten()
+        .any(|slot| slot.session_id.as_deref() == Some(&session_id));
+    if in_slot {
+        return Err("メディアが処理枠に残っているため削除できません".into());
+    }
+
+    let was_paused = shared.is_paused();
+    shared
+        .paused
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    shared.nas_wakeup.notify_one();
+    let _operation = match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        shared.nas_operation.lock(),
+    )
+    .await
+    {
+        Ok(operation) => operation,
+        Err(_) => {
+            if !was_paused {
+                shared
+                    .paused
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+            return Err("NAS 転送を停止できなかったため、SSD データは削除しませんでした".into());
+        }
+    };
+    let _session_operation = shared.media_session_operation.lock().await;
+    // 排他を取るまでに、完了・再挿入で状態が変わっていないか再確認する。
+    let current = match shared.db().get_session(&session_id) {
+        Ok(current) => current,
+        Err(e) => {
+            if !was_paused {
+                shared
+                    .paused
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+            return Err(e.to_string());
+        }
+    };
+    let still_valid = current.is_some_and(|s| {
+        s.staging_deleted_at_utc.is_none()
+            && !s.state.is_media_active()
+            && s.state != backup_core::state::SessionState::Complete
+    }) && !shared
+        .rt()
+        .slots
+        .iter()
+        .flatten()
+        .any(|s| s.session_id.as_deref() == Some(&session_id));
+    if !still_valid {
+        if !was_paused {
+            shared
+                .paused
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+        return Err(
+            "セッションの状態が変わったため削除しませんでした。画面を更新してください".into(),
+        );
+    }
+
+    let staging = shared.staging.clone();
+    let sid = session_id.clone();
+    let remove_result =
+        match tokio::task::spawn_blocking(move || staging.remove_session(&sid)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(format!("SSD のセッションフォルダを削除できません: {e}")),
+            Err(e) => Err(format!("SSD の削除処理を実行できません: {e}")),
+        };
+    if let Err(e) = remove_result {
+        if !was_paused {
+            shared
+                .paused
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+        return Err(e);
+    }
+
+    if let Err(e) = shared.db().discard_session(&session_id) {
+        if !was_paused {
+            shared
+                .paused
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+        return Err(format!("削除済みデータの履歴を更新できません: {e}"));
+    }
+    if !was_paused {
+        shared
+            .paused
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+    shared.event(
+        Some(&session_id),
+        "warn",
+        "session_discarded",
+        &format!(
+            "{} の NAS 未検証データを SSD から削除しました",
+            session.folder_name
+        ),
+    );
+    shared.capacity_wakeup.notify_waiters();
+    shared.nas_wakeup.notify_one();
+    Ok(Response::Ok {
+        message: format!(
+            "{} の SSD データと NAS 転送待ちを削除しました",
+            session.folder_name
+        ),
+    })
 }
 
 pub fn to_view(cfg: &Config) -> SettingsView {

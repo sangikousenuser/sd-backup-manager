@@ -95,12 +95,26 @@ pub struct TransferJob {
     pub attempts: u32,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct TransferInfo {
+    pub attempts: u32,
+    pub next_attempt_utc: Option<String>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct FilePage {
+    pub files: Vec<(FileRow, TransferInfo)>,
+    pub total: u64,
+}
+
 pub mod transfer_state {
     pub const QUEUED: &str = "QUEUED";
     pub const UPLOADING: &str = "UPLOADING";
     pub const RETRY_WAIT: &str = "RETRY_WAIT";
     pub const DONE: &str = "DONE";
     pub const FAILED: &str = "FAILED";
+    pub const CANCELLED: &str = "CANCELLED";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +145,7 @@ pub struct EventRow {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NasQueueStats {
+    pub cancelled_files: u64,
     pub queued_files: u64,
     pub queued_bytes: u64,
     pub retry_wait_files: u64,

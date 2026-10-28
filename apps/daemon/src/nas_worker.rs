@@ -106,6 +106,11 @@ pub async fn run(shared: Arc<Shared>) {
             }
         };
 
+        // ユーザーのファイル操作中は、転送の取得と完了処理も開始しない。
+        let operation = shared.nas_operation.lock().await;
+        if shared.is_paused() || shared.shutdown.is_cancelled() {
+            continue;
+        }
         // 転送
         let job = shared.db().next_due_transfer(&now_utc());
         match job {
@@ -121,6 +126,7 @@ pub async fn run(shared: Arc<Shared>) {
         if let Err(e) = finalize_sessions(&shared, &nas, &cfg).await {
             tracing::error!("session finalization failed: {e:#}");
         }
+        drop(operation);
         if wait(&shared, Duration::from_secs(3)).await {
             return;
         }
@@ -191,7 +197,14 @@ async fn transfer_one(
                 &job2.blake3_hash,
                 &mut |n| {
                     done += n;
-                    if shared2.shutdown.is_cancelled() || shared2.is_paused() {
+                    if shared2.shutdown.is_cancelled()
+                        || shared2.is_paused()
+                        || shared2
+                            .nas_cancel_files
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .contains_key(&job2.file_id)
+                    {
                         return Control::Abort;
                     }
                     let mut rt = shared2.rt();
@@ -525,7 +538,7 @@ async fn finalize_session(
     Ok(())
 }
 
-fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let dir = path
         .parent()

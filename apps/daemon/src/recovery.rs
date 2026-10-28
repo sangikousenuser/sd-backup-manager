@@ -35,6 +35,25 @@ pub fn recover(shared: &Shared) -> anyhow::Result<()> {
             continue;
         }
         let files = shared.db().files_for_session(&s.session_id)?;
+        let deleting: Vec<_> = files
+            .iter()
+            .filter(|f| f.stage_state == StageState::DeletePending)
+            .collect();
+        for file in &deleting {
+            if let Err(e) = crate::file_actions::finish_deletion(shared, file) {
+                shared.event(Some(&s.session_id), "warn", "file_delete_pending", &e);
+            }
+        }
+        if !deleting.is_empty()
+            && let Err(e) = crate::file_actions::refresh_manifest(shared, &s.session_id)
+        {
+            shared.event(
+                Some(&s.session_id),
+                "warn",
+                "manifest_update_failed",
+                &e.to_string(),
+            );
+        }
         for f in files
             .iter()
             .filter(|f| f.stage_state == StageState::SsdVerified)

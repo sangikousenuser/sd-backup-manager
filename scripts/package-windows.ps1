@@ -11,7 +11,12 @@ Set-Location $root
 New-Item -ItemType Directory -Force -Path dist | Out-Null
 
 $version = $Tag.TrimStart('v')
-if ($version -notmatch '^\d') { $version = '0.0.0' }
+if ($version -notmatch '^\d') {
+    # CI のインストーラもアプリ本体と同じバージョンを表示する。
+    $workspaceVersion = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+    if (-not $workspaceVersion) { throw 'Workspace version not found in Cargo.toml' }
+    $version = $workspaceVersion.Matches[0].Groups[1].Value
+}
 
 # ポータブル zip（インストーラを使わない場合・検証用）
 $name = "sd-backup-manager-$Tag-x86_64-windows"

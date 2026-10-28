@@ -39,6 +39,12 @@ pub struct Shared {
     pub runtime: Mutex<Runtime>,
     /// NAS ワーカーを起こす（新しい検証済みファイル・今すぐ再試行など）。
     pub nas_wakeup: Notify,
+    /// 転送・完了処理とユーザー操作を直列化する。接続待ちの間は保持しない。
+    pub nas_operation: tokio::sync::Mutex<()>,
+    /// 削除と、SD 再挿入時のセッション再開の確定を排他にする。
+    pub media_session_operation: tokio::sync::Mutex<()>,
+    /// 操作待ちのファイルはチャンク境界で転送を中断する。
+    pub nas_cancel_files: Mutex<HashMap<String, usize>>,
     /// 容量待ちのメディアを起こす（SSD 削除で空きが増えた等）。
     pub capacity_wakeup: Notify,
     pub shutdown: CancellationToken,
@@ -70,6 +76,9 @@ impl Shared {
             devices,
             runtime: Mutex::new(Runtime::new(slots)),
             nas_wakeup: Notify::new(),
+            nas_operation: tokio::sync::Mutex::new(()),
+            media_session_operation: tokio::sync::Mutex::new(()),
+            nas_cancel_files: Mutex::default(),
             capacity_wakeup: Notify::new(),
             shutdown,
             snapshot_tx,

@@ -34,6 +34,15 @@ pub enum Command {
     GetFiles {
         session_id: String,
         only_problems: bool,
+        #[serde(default)]
+        offset: u32,
+        #[serde(default = "default_file_limit")]
+        limit: u32,
+    },
+    ManageNasFiles {
+        session_id: String,
+        file_ids: Vec<String>,
+        action: NasFileAction,
     },
     ListEvents {
         days: u32,
@@ -61,6 +70,10 @@ pub enum Command {
     RestoreLayout {
         session_id: String,
         dest_dir: String,
+    },
+    /// NAS 未検証のセッションを破棄し、SSD のステージングデータも削除する。
+    DiscardSession {
+        session_id: String,
     },
     /// デーモンの正常停止（インストーラ・更新時に使う。処理中のコピーは安全に中断される）
     Shutdown,
@@ -96,6 +109,8 @@ pub enum Response {
     },
     Files {
         files: Vec<FileSummary>,
+        #[serde(default)]
+        total_files: u64,
     },
     Events {
         events: Vec<EventSummary>,
@@ -227,6 +242,8 @@ pub struct WaitingView {
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct NasView {
+    #[serde(default)]
+    pub cancelled_files: u64,
     pub configured: bool,
     pub connected: bool,
     pub target: String,
@@ -302,7 +319,23 @@ pub struct FileSummary {
     pub stage_state: String,
     pub nas_state: String,
     pub copy_attempts: u32,
+    #[serde(default)]
+    pub nas_attempts: u32,
+    #[serde(default)]
+    pub next_retry_utc: Option<String>,
     pub error: Option<String>,
+}
+
+fn default_file_limit() -> u32 {
+    5000
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NasFileAction {
+    Retry,
+    Cancel,
+    DeleteLocal,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -350,6 +383,8 @@ mod tests {
             command: Command::GetFiles {
                 session_id: "s".into(),
                 only_problems: true,
+                offset: 0,
+                limit: 200,
             },
         };
         let s = serde_json::to_string(&m).unwrap();

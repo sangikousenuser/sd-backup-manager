@@ -60,6 +60,7 @@ string_enum!(
         NasVerified => "NAS_VERIFIED",
         StagingCleanup => "STAGING_CLEANUP",
         Complete => "COMPLETE",
+        Discarded => "DISCARDED",
     }
 );
 
@@ -105,6 +106,20 @@ impl SessionState {
                 | (NasVerified, NasPending)
                 | (StagingCleanup, Complete)
                 | (StagingCleanup, NasPending)
+                | (Detected, Discarded)
+                | (Scanning, Discarded)
+                | (Blocked, Discarded)
+                | (Copying, Discarded)
+                | (SourceInterrupted, Discarded)
+                | (SourceFinalizing, Discarded)
+                | (Unmounting, Discarded)
+                | (UnmountFailed, Discarded)
+                | (MediaGreen, Discarded)
+                | (MediaYellow, Discarded)
+                | (NasPending, Discarded)
+                | (NeedsAttention, Discarded)
+                | (NasVerified, Discarded)
+                | (StagingCleanup, Discarded)
                 | (NeedsAttention, Copying)
                 | (NeedsAttention, Scanning)
         )
@@ -138,6 +153,7 @@ impl SessionState {
                 | NasVerified
                 | StagingCleanup
                 | Complete
+                | Discarded
         )
     }
 }
@@ -153,10 +169,18 @@ string_enum!(
         FailedRetryable => "FAILED_RETRYABLE",
         FailedTerminal => "FAILED_TERMINAL",
         SourceRemoved => "SOURCE_REMOVED",
+        DeletePending => "DELETE_PENDING",
+        Discarded => "DISCARDED",
     }
 );
 
 impl StageState {
+    pub fn is_problem(self) -> bool {
+        matches!(
+            self,
+            Self::FailedTerminal | Self::DeletePending | Self::Discarded
+        )
+    }
     /// SSD への取り込みとして完了扱いできる状態。
     pub fn is_done(self) -> bool {
         matches!(self, StageState::SsdVerified | StageState::SkippedVerified)
@@ -185,6 +209,9 @@ string_enum!(
         NasVerified => "NAS_VERIFIED",
         RetryWait => "RETRY_WAIT",
         NasFailed => "NAS_FAILED",
+        Cancelled => "CANCELLED",
+        DeletePending => "DELETE_PENDING",
+        Deleted => "DELETED",
     }
 );
 

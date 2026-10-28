@@ -17,6 +17,10 @@ use thiserror::Error;
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../../../migrations/0001_init.sql")),
     (2, include_str!("../../../migrations/0002_cards.sql")),
+    (
+        3,
+        include_str!("../../../migrations/0003_nas_file_controls.sql"),
+    ),
 ];
 
 #[derive(Debug, Error)]

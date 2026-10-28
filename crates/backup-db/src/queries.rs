@@ -634,6 +634,28 @@ impl Db {
         Ok(())
     }
 
+    /// NAS 未検証のセッションを明示的に破棄し、残った転送ジョブも無効化する。
+    pub fn discard_session(&self, session_id: &str) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        let now = now_utc();
+        tx.execute("DELETE FROM transfers WHERE session_id = ?1", [session_id])?;
+        tx.execute(
+            "UPDATE sessions SET state = 'DISCARDED', staging_deleted_at_utc = ?2,
+                last_error = ?3, updated_at_utc = ?2
+             WHERE session_id = ?1",
+            params![
+                session_id,
+                now,
+                "ユーザー操作により NAS 未検証の SSD データを破棄しました"
+            ],
+        )?;
+        if tx.changes() == 0 {
+            return Err(DbError::NotFound(session_id.to_string()));
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// files テーブルから集計値を再計算して保存する。
     pub fn refresh_session_counters(&self, session_id: &str) -> Result<SessionRow> {
         self.conn.execute(
@@ -643,7 +665,7 @@ impl Db {
                 completed_files = (SELECT COUNT(*) FROM files WHERE session_id = ?1
                     AND stage_state IN ('SSD_VERIFIED', 'SKIPPED_VERIFIED')),
                 failed_files = (SELECT COUNT(*) FROM files WHERE session_id = ?1
-                    AND stage_state = 'FAILED_TERMINAL'),
+                    AND stage_state IN ('FAILED_TERMINAL','DELETE_PENDING','DISCARDED')),
                 nas_verified_files = (SELECT COUNT(*) FROM files WHERE session_id = ?1
                     AND (nas_state = 'NAS_VERIFIED' OR (stage_state = 'SKIPPED_VERIFIED' AND reference_verified = 1))),
                 updated_at_utc = ?2
@@ -713,7 +735,7 @@ impl Db {
         self.conn.execute(
             "UPDATE files SET size_bytes = ?2, source_mtime_ns = ?3, stage_state = 'DISCOVERED',
                 error_code = NULL, last_error = NULL, copy_attempts = 0
-             WHERE file_id = ?1 AND stage_state NOT IN ('SSD_VERIFIED', 'SKIPPED_VERIFIED')",
+             WHERE file_id = ?1 AND stage_state NOT IN ('SSD_VERIFIED', 'SKIPPED_VERIFIED', 'DELETE_PENDING', 'DISCARDED')",
             params![file_id, size as i64, mtime_ns],
         )?;
         Ok(())
@@ -836,6 +858,96 @@ impl Db {
     // transfers
     // ------------------------------------------------------------------
 
+    pub fn files_page(
+        &self,
+        sid: &str,
+        problems: bool,
+        offset: u32,
+        limit: u32,
+    ) -> Result<FilePage> {
+        let filter = "f.session_id = ?1 AND (?2 = 0 OR f.stage_state NOT IN ('SSD_VERIFIED','SKIPPED_VERIFIED') OR (f.stage_state = 'SSD_VERIFIED' AND f.nas_state != 'NAS_VERIFIED'))";
+        let total: i64 = self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM files f WHERE {filter}"),
+            params![sid, problems],
+            |r| r.get(0),
+        )?;
+        let cols = FILE_COLS
+            .split(',')
+            .map(|c| format!("f.{}", c.trim()))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut stmt = self.conn.prepare(&format!("SELECT {cols}, COALESCE(t.attempts,0), t.next_attempt_utc, t.last_error FROM files f LEFT JOIN transfers t ON t.file_id = f.file_id WHERE {filter} ORDER BY f.partition_index, f.source_rel_path LIMIT ?3 OFFSET ?4"))?;
+        let files = stmt
+            .query_map(params![sid, problems, limit.clamp(1, 5000), offset], |r| {
+                Ok((
+                    file_row(r)?,
+                    TransferInfo {
+                        attempts: r.get(21)?,
+                        next_attempt_utc: r.get(22)?,
+                        last_error: r.get(23)?,
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(FilePage {
+            files,
+            total: total as u64,
+        })
+    }
+
+    /// 呼び出し側が NAS ワーカーとの排他を確保する。検証済み・別セッションは一括で拒否する。
+    pub fn manage_nas_files(&self, sid: &str, ids: &[String], retry: bool) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        let s = self
+            .get_session(sid)?
+            .ok_or_else(|| DbError::NotFound(sid.into()))?;
+        if matches!(
+            s.state,
+            SessionState::Complete
+                | SessionState::Discarded
+                | SessionState::NasVerified
+                | SessionState::StagingCleanup
+        ) || s.staging_deleted_at_utc.is_some()
+        {
+            return Err(DbError::Corrupt(
+                "完了・削除済みのセッションは操作できません".into(),
+            ));
+        }
+        if ids.is_empty() || ids.len() > 1000 {
+            return Err(DbError::Corrupt(
+                "ファイルは 1〜1000 件を選択してください".into(),
+            ));
+        }
+        let mut unique = std::collections::HashSet::new();
+        for id in ids {
+            if !unique.insert(id) {
+                return Err(DbError::Corrupt("選択が重複しています".into()));
+            }
+            let valid: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM files f JOIN transfers t ON t.file_id = f.file_id
+                 WHERE f.file_id = ?1 AND f.session_id = ?2 AND f.stage_state = 'SSD_VERIFIED'
+                   AND f.blake3_hash IS NOT NULL AND f.nas_state IN ('QUEUED','RETRY_WAIT','NAS_FAILED','CANCELLED')
+                   AND t.state IN ('QUEUED','RETRY_WAIT','FAILED','CANCELLED'))", params![id, sid], |r| r.get(0))?;
+            if !valid {
+                return Err(DbError::Corrupt(
+                    "選択したファイルの状態が変わりました。更新して選び直してください".into(),
+                ));
+            }
+        }
+        let now = now_utc();
+        let state = if retry { "QUEUED" } else { "CANCELLED" };
+        for id in ids {
+            tx.execute("UPDATE transfers SET state = ?2, next_attempt_utc = NULL, nas_temp_rel_path = NULL, last_error = ?3, updated_at_utc = ?4 WHERE file_id = ?1", params![id, state, if retry { None } else { Some("ユーザーが転送を中止しました（PC 内のコピーは保持）") }, now])?;
+            tx.execute(
+                "UPDATE files SET nas_state = ?2 WHERE file_id = ?1",
+                params![id, state],
+            )?;
+        }
+        // CANCELLED は未完了のまま保持し、NAS 全件成功や SSD 自動削除の対象にしない。
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn next_due_transfer(&self, now: &str) -> Result<Option<TransferJob>> {
         Ok(self
             .conn
@@ -865,6 +977,72 @@ impl Db {
                 },
             )
             .optional()?)
+    }
+
+    /// 削除の意図を先に永続化する。再起動時にも未送信データを再キューしない。
+    pub fn prepare_nas_file_deletion(&self, sid: &str, ids: &[String]) -> Result<Vec<FileRow>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let s = self
+            .get_session(sid)?
+            .ok_or_else(|| DbError::NotFound(sid.into()))?;
+        if s.staging_deleted_at_utc.is_some()
+            || !matches!(
+                s.state,
+                SessionState::NasPending
+                    | SessionState::NeedsAttention
+                    | SessionState::SourceInterrupted
+                    | SessionState::UnmountFailed
+            )
+        {
+            return Err(DbError::Corrupt(
+                "SD の取り込み終了後のセッションだけ削除できます".into(),
+            ));
+        }
+        if ids.is_empty() || ids.len() > 1000 {
+            return Err(DbError::Corrupt(
+                "ファイルは 1〜1000 件を選択してください".into(),
+            ));
+        }
+        let mut unique = std::collections::HashSet::new();
+        for id in ids {
+            let f = self
+                .get_file(id)?
+                .ok_or_else(|| DbError::NotFound(id.clone()))?;
+            if !unique.insert(id)
+                || f.session_id != sid
+                || !matches!(
+                    f.stage_state,
+                    StageState::SsdVerified | StageState::DeletePending
+                )
+                || matches!(
+                    f.nas_state,
+                    NasFileState::NasVerified | NasFileState::Uploading | NasFileState::Verifying
+                )
+            {
+                return Err(DbError::Corrupt(
+                    "削除対象の状態が変わりました。更新して選び直してください".into(),
+                ));
+            }
+        }
+        for id in ids {
+            tx.execute("UPDATE files SET stage_state = 'DELETE_PENDING', nas_state = 'DELETE_PENDING', error_code = 'USER_DELETE', last_error = 'ユーザー指定による PC コピーの削除待ち' WHERE file_id = ?1", [id])?;
+            tx.execute("DELETE FROM transfers WHERE file_id = ?1", [id])?;
+        }
+        if s.state == SessionState::NasPending {
+            tx.execute("UPDATE sessions SET state = 'NEEDS_ATTENTION', last_error = 'ユーザーがファイルを削除しました（全件成功ではありません）', updated_at_utc = ?2 WHERE session_id = ?1", params![sid, now_utc()])?;
+        }
+        tx.commit()?;
+        ids.iter()
+            .map(|id| {
+                self.get_file(id)?
+                    .ok_or_else(|| DbError::NotFound(id.clone()))
+            })
+            .collect()
+    }
+
+    pub fn finish_nas_file_deletion(&self, id: &str) -> Result<()> {
+        self.conn.execute("UPDATE files SET stage_state = 'DISCARDED', nas_state = 'DELETED', verified_ssd_at_utc = NULL, last_error = 'ユーザー操作で PC 内のコピーと転送キューを削除しました' WHERE file_id = ?1 AND stage_state = 'DELETE_PENDING'", [id])?;
+        Ok(())
     }
 
     pub fn transfer_started(&self, job: &TransferJob, temp_rel: &str) -> Result<()> {
@@ -960,10 +1138,14 @@ impl Db {
 
     /// 「今すぐ再試行」。
     pub fn retry_all_transfers_now(&self) -> Result<usize> {
-        Ok(self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("UPDATE files SET nas_state = 'QUEUED' WHERE file_id IN (SELECT file_id FROM transfers WHERE state IN ('RETRY_WAIT','FAILED'))", [])?;
+        let n = tx.execute(
             "UPDATE transfers SET next_attempt_utc = NULL, state = 'QUEUED' WHERE state IN ('RETRY_WAIT', 'FAILED')",
             [],
-        )?)
+        )?;
+        tx.commit()?;
+        Ok(n)
     }
 
     pub fn pending_transfer_count(&self, session_id: &str) -> Result<u64> {
@@ -976,7 +1158,7 @@ impl Db {
     }
 
     pub fn nas_queue_stats(&self) -> Result<NasQueueStats> {
-        let (queued_files, queued_bytes, retry, failed, uploading, max_attempts): (i64, i64, i64, i64, i64, i64) =
+        let (queued_files, queued_bytes, retry, failed, uploading, max_attempts, cancelled): (i64, i64, i64, i64, i64, i64, i64) =
             self.conn.query_row(
                 "SELECT
                     COALESCE(SUM(CASE WHEN t.state IN ('QUEUED','RETRY_WAIT','UPLOADING') THEN 1 ELSE 0 END), 0),
@@ -984,10 +1166,11 @@ impl Db {
                     COALESCE(SUM(CASE WHEN t.state = 'RETRY_WAIT' THEN 1 ELSE 0 END), 0),
                     COALESCE(SUM(CASE WHEN t.state = 'FAILED' THEN 1 ELSE 0 END), 0),
                     COALESCE(SUM(CASE WHEN t.state = 'UPLOADING' THEN 1 ELSE 0 END), 0),
-                    COALESCE(MAX(CASE WHEN t.state != 'DONE' THEN t.attempts ELSE 0 END), 0)
+                    COALESCE(MAX(CASE WHEN t.state IN ('QUEUED','RETRY_WAIT','UPLOADING','FAILED') THEN t.attempts ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN t.state = 'CANCELLED' THEN 1 ELSE 0 END), 0)
                  FROM transfers t JOIN files f ON f.file_id = t.file_id",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
             )?;
         let (next, last_error): (Option<String>, Option<String>) = self
             .conn
@@ -1000,6 +1183,7 @@ impl Db {
             .optional()?
             .unwrap_or((None, None));
         Ok(NasQueueStats {
+            cancelled_files: cancelled as u64,
             queued_files: queued_files as u64,
             queued_bytes: queued_bytes as u64,
             retry_wait_files: retry as u64,

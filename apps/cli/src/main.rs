@@ -203,9 +203,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Cmd::Files { session_id, all } => {
-            let Response::Files { files } = daemon(Command::GetFiles {
+            let Response::Files { files, .. } = daemon(Command::GetFiles {
                 session_id,
                 only_problems: !all,
+                offset: 0,
+                limit: 5000,
             })
             .await?
             else {

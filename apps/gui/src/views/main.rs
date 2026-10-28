@@ -216,6 +216,9 @@ fn nas_card(snap: &backup_ipc::Snapshot) -> Element<'_, Message> {
         n.retry_wait_files,
         n.sessions_pending
     )));
+    if n.cancelled_files > 0 {
+        col = col.push(text(format!("中止 {} 件は PC に保持中です。「ファイルごとの操作・履歴」で選択して再開できます。", n.cancelled_files)).size(13).color(theme::YELLOW));
+    }
     if let Some(e) = &n.last_error {
         let mut msg = format!("最終エラー: {e}");
         if n.attempts > 0 {
@@ -242,7 +245,7 @@ fn nas_card(snap: &backup_ipc::Snapshot) -> Element<'_, Message> {
         row![
             button(text("今すぐ再試行")).on_press(Message::Run(Command::RetryNas)),
             pause,
-            button(text("履歴"))
+            button(text("ファイルごとの操作・履歴"))
                 .on_press(Message::Navigate(Screen::History))
                 .style(button::secondary),
             button(text("設定"))

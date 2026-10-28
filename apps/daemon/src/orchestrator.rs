@@ -264,6 +264,7 @@ async fn process_media(
     };
     with_slot(shared, slot, |s| s.media = media.clone());
 
+    let session_operation = shared.media_session_operation.lock().await;
     // 2. 識別と信頼度（同じ識別子のメディアが同時に接続されていればクローン扱い）
     let identity = media.identity_hash();
     let mut confidence = media.base_confidence();
@@ -336,6 +337,7 @@ async fn process_media(
         s.folder_name = Some(session.folder_name.clone());
         s.confidence = Some(confidence.as_str().into());
     });
+    drop(session_operation);
     shared.event(
         Some(&sid),
         "info",
@@ -417,10 +419,7 @@ async fn process_media(
             .iter()
             .filter(|f| f.stage_state == StageState::SkippedVerified)
             .count() as u64;
-        s.files_failed = files
-            .iter()
-            .filter(|f| f.stage_state == StageState::FailedTerminal)
-            .count() as u64;
+        s.files_failed = files.iter().filter(|f| f.stage_state.is_problem()).count() as u64;
         s.bytes_total = files.iter().map(|f| f.size_bytes).sum();
         s.bytes_done = done_bytes;
         s.remaining_bytes = required;
@@ -454,10 +453,7 @@ async fn process_media(
         .iter()
         .map(|p| (p.part_index, p.fingerprint.clone()))
         .collect();
-    let mut failed_count = files
-        .iter()
-        .filter(|f| f.stage_state == StageState::FailedTerminal)
-        .count() as u64;
+    let mut failed_count = files.iter().filter(|f| f.stage_state.is_problem()).count() as u64;
     let mut current_done = done_bytes;
 
     for f in pending {
@@ -666,7 +662,13 @@ fn register_files(
     }
     // 再開時、以前あったのに見つからない未完了ファイルは失敗として残す（成功扱いしない）
     for (key, row) in &by_key {
-        if !seen.contains(key) && !row.stage_state.is_done() {
+        if !seen.contains(key)
+            && !row.stage_state.is_done()
+            && !matches!(
+                row.stage_state,
+                StageState::DeletePending | StageState::Discarded
+            )
+        {
             db.set_file_error(
                 &row.file_id,
                 StageState::FailedTerminal,

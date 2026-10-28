@@ -1,5 +1,6 @@
 //! SD Backup Manager デーモン（`systemd --user` で常駐）。
 
+pub mod file_actions;
 pub mod ipc_server;
 pub mod nas_backend;
 pub mod nas_worker;

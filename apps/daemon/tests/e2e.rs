@@ -844,3 +844,348 @@ async fn formatted_cards_reuse_only_native_card_serial_and_never_resume_old_sess
         shutdown(shared, token).await;
     }
 }
+
+async fn nas_file_command(
+    e: &Env,
+    sid: &str,
+    ids: Vec<String>,
+    action: backup_ipc::NasFileAction,
+) -> Result<backup_ipc::Response, String> {
+    backup_ipc::one_shot(
+        &AppPaths::under(&e.base).socket_path(),
+        "nas-file-test",
+        backup_ipc::Command::ManageNasFiles {
+            session_id: sid.into(),
+            file_ids: ids,
+            action,
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn selected_nas_files_can_cancel_keep_pc_restart_and_resume_without_blocking_other_files() {
+    use backup_core::state::NasFileState;
+    use backup_ipc::NasFileAction;
+    let e = env();
+    let offline = e.base.join("offline-nas");
+    let opts = || {
+        options(
+            &e,
+            Overrides {
+                nas_local_dir: Some(offline.clone()),
+                ..Default::default()
+            },
+        )
+    };
+    let token = CancellationToken::new();
+    let shared = start(opts(), token.clone()).await.unwrap();
+    make_card(&e.media, "selected-nas");
+    wait_until("SSD backup complete", Duration::from_secs(20), || {
+        slot_phase(&shared, 0) == Some(SlotPhase::DoneGreen)
+    })
+    .await;
+    let sid = session_of_slot(&shared, 0).unwrap();
+    let files = shared.db().files_for_session(&sid).unwrap();
+    let selected = files
+        .iter()
+        .find(|f| f.source_rel_path == "README.TXT")
+        .unwrap();
+    let selected_id = selected.file_id.clone();
+    let selected_path = shared
+        .staging
+        .final_path(&sid, &selected.destination_rel_path)
+        .unwrap();
+    nas_file_command(&e, &sid, vec![selected_id.clone()], NasFileAction::Cancel)
+        .await
+        .unwrap();
+    assert_eq!(fs::read(&selected_path).unwrap(), b"hello");
+    assert_eq!(
+        shared
+            .db()
+            .get_file(&selected_id)
+            .unwrap()
+            .unwrap()
+            .nas_state,
+        NasFileState::Cancelled
+    );
+    assert_eq!(shared.db().nas_queue_stats().unwrap().cancelled_files, 1);
+    assert_eq!(
+        shared.db().nas_queue_stats().unwrap().queued_files,
+        files.len() as u64 - 1
+    );
+    // 一括再試行や再起動で、個別に中止した転送を復活させない。
+    sd_backup_daemon::nas_worker::retry_now(&shared);
+    remove_retry(e.media.join("selected-nas")).unwrap();
+    wait_until("source removed", Duration::from_secs(10), || {
+        slot_phase(&shared, 0).is_none()
+    })
+    .await;
+    shutdown(shared, token).await;
+    let token = CancellationToken::new();
+    let shared = start(opts(), token.clone()).await.unwrap();
+    assert_eq!(
+        shared
+            .db()
+            .get_file(&selected_id)
+            .unwrap()
+            .unwrap()
+            .nas_state,
+        NasFileState::Cancelled
+    );
+    let response = backup_ipc::one_shot(
+        &AppPaths::under(&e.base).socket_path(),
+        "nas-page-test",
+        backup_ipc::Command::GetFiles {
+            session_id: sid.clone(),
+            only_problems: true,
+            offset: 1,
+            limit: 2,
+        },
+    )
+    .await
+    .unwrap();
+    let backup_ipc::Response::Files {
+        files: page,
+        total_files,
+    } = response
+    else {
+        panic!("unexpected response");
+    };
+    assert_eq!(page.len(), 2);
+    assert_eq!(total_files, files.len() as u64);
+    fs::create_dir_all(&offline).unwrap();
+    shared.nas_wakeup.notify_one();
+    wait_until("other files reach NAS", Duration::from_secs(30), || {
+        shared
+            .db()
+            .files_for_session(&sid)
+            .unwrap()
+            .iter()
+            .all(|f| f.file_id == selected_id || f.nas_state == NasFileState::NasVerified)
+    })
+    .await;
+    assert!(
+        selected_path.exists(),
+        "NAS 全件成功ではないので PC 内のコピーを消さない"
+    );
+    assert_eq!(session_state(&shared, &sid), SessionState::NasPending);
+    let verified = files.iter().find(|f| f.file_id != selected_id).unwrap();
+    assert!(
+        nas_file_command(
+            &e,
+            &sid,
+            vec![selected_id.clone(), verified.file_id.clone()],
+            NasFileAction::Cancel
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        shared
+            .db()
+            .get_file(&selected_id)
+            .unwrap()
+            .unwrap()
+            .nas_state,
+        NasFileState::Cancelled
+    );
+    nas_file_command(&e, &sid, vec![selected_id.clone()], NasFileAction::Retry)
+        .await
+        .unwrap();
+    wait_until(
+        "selected file resumed and session complete",
+        Duration::from_secs(30),
+        || session_state(&shared, &sid) == SessionState::Complete,
+    )
+    .await;
+    let session = shared.db().get_session(&sid).unwrap().unwrap();
+    assert!(!selected_path.exists());
+    assert_eq!(
+        fs::read(
+            offline
+                .join(session.folder_name)
+                .join(selected.destination_rel_path.clone())
+        )
+        .unwrap(),
+        b"hello"
+    );
+    shutdown(shared, token).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn selected_local_deletion_removes_only_pc_copy_and_queue_and_recovers_after_restart() {
+    use backup_core::state::NasFileState;
+    use backup_ipc::NasFileAction;
+    let e = env();
+    let offline = e.base.join("offline-delete-nas");
+    let opts = || {
+        options(
+            &e,
+            Overrides {
+                nas_local_dir: Some(offline.clone()),
+                ..Default::default()
+            },
+        )
+    };
+    let token = CancellationToken::new();
+    let shared = start(opts(), token.clone()).await.unwrap();
+    make_card(&e.media, "delete-files");
+    wait_until("SSD files ready", Duration::from_secs(20), || {
+        slot_phase(&shared, 0) == Some(SlotPhase::DoneGreen)
+    })
+    .await;
+    let sid = session_of_slot(&shared, 0).unwrap();
+    let session = shared.db().get_session(&sid).unwrap().unwrap();
+    let files = shared.db().files_for_session(&sid).unwrap();
+    let selected = files
+        .iter()
+        .find(|f| f.source_rel_path == "README.TXT")
+        .unwrap();
+    let other = files
+        .iter()
+        .find(|f| f.source_rel_path == "DATA/notes.xyz")
+        .unwrap();
+    let selected_path = shared
+        .staging
+        .final_path(&sid, &selected.destination_rel_path)
+        .unwrap();
+    let other_path = shared
+        .staging
+        .final_path(&sid, &other.destination_rel_path)
+        .unwrap();
+    let nas_existing = e
+        .nas
+        .join(&session.folder_name)
+        .join(&selected.destination_rel_path);
+    write(&nas_existing, b"existing NAS copy");
+    let part = shared
+        .staging
+        .partial_path(&sid, &selected.file_id)
+        .unwrap();
+    write(&part, b"stale partial");
+    let card_out = e.base.join("delete-card-out");
+    rename_retry(e.media.join("delete-files"), &card_out).unwrap();
+    wait_until("SD removed before delete", Duration::from_secs(10), || {
+        slot_phase(&shared, 0).is_none()
+    })
+    .await;
+    nas_file_command(
+        &e,
+        &sid,
+        vec![selected.file_id.clone()],
+        NasFileAction::DeleteLocal,
+    )
+    .await
+    .unwrap();
+    assert!(!selected_path.exists());
+    assert!(!part.exists());
+    assert!(other_path.exists());
+    assert_eq!(fs::read(&nas_existing).unwrap(), b"existing NAS copy");
+    assert_eq!(fs::read(card_out.join("p1/README.TXT")).unwrap(), b"hello");
+    assert_eq!(
+        shared.db().pending_transfer_count(&sid).unwrap(),
+        files.len() as u64 - 1
+    );
+    assert_eq!(
+        shared
+            .db()
+            .get_file(&selected.file_id)
+            .unwrap()
+            .unwrap()
+            .nas_state,
+        NasFileState::Deleted
+    );
+    assert_eq!(session_state(&shared, &sid), SessionState::NeedsAttention);
+    assert!(
+        nas_file_command(
+            &e,
+            &sid,
+            vec![selected.file_id.clone()],
+            NasFileAction::Retry
+        )
+        .await
+        .is_err()
+    );
+    let manifest = backup_core::manifest::Manifest::parse_and_validate(
+        &fs::read(shared.staging.manifest_path(&sid).unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest
+            .files
+            .iter()
+            .find(|f| f.file_id == selected.file_id)
+            .unwrap()
+            .status,
+        backup_core::manifest::ManifestFileStatus::Failed
+    );
+    // DB への削除意図の記録直後に停止した状態を模擬し、次回起動で続きを実行する。
+    shared
+        .db()
+        .prepare_nas_file_deletion(&sid, std::slice::from_ref(&other.file_id))
+        .unwrap();
+    assert!(other_path.exists());
+    shutdown(shared, token).await;
+    let token = CancellationToken::new();
+    let shared = start(opts(), token.clone()).await.unwrap();
+    assert!(!other_path.exists());
+    assert_eq!(
+        shared
+            .db()
+            .get_file(&other.file_id)
+            .unwrap()
+            .unwrap()
+            .stage_state,
+        StageState::Discarded
+    );
+    assert_eq!(
+        shared.db().pending_transfer_count(&sid).unwrap(),
+        files.len() as u64 - 2
+    );
+    assert_eq!(fs::read(&nas_existing).unwrap(), b"existing NAS copy");
+    let kept = files
+        .iter()
+        .find(|f| f.file_id != selected.file_id && f.file_id != other.file_id)
+        .unwrap();
+    assert!(
+        shared
+            .staging
+            .final_path(&sid, &kept.destination_rel_path)
+            .unwrap()
+            .exists()
+    );
+    fs::create_dir_all(&offline).unwrap();
+    shared.nas_wakeup.notify_one();
+    wait_until(
+        "non-deleted files transferred",
+        Duration::from_secs(30),
+        || {
+            shared
+                .db()
+                .files_for_session(&sid)
+                .unwrap()
+                .iter()
+                .all(|f| {
+                    f.stage_state == StageState::Discarded
+                        || f.nas_state == NasFileState::NasVerified
+                })
+        },
+    )
+    .await;
+    assert!(
+        !offline
+            .join(&session.folder_name)
+            .join(&selected.destination_rel_path)
+            .exists()
+    );
+    assert!(
+        !offline
+            .join(&session.folder_name)
+            .join(&other.destination_rel_path)
+            .exists()
+    );
+    assert_eq!(session_state(&shared, &sid), SessionState::NeedsAttention);
+    shutdown(shared, token).await;
+}

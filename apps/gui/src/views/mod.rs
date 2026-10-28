@@ -138,6 +138,7 @@ pub fn session_state_label(state: &str) -> &'static str {
         "NAS_VERIFIED" => "NAS 検証済み",
         "STAGING_CLEANUP" => "SSD 削除中",
         "COMPLETE" => "完了",
+        "DISCARDED" => "SSD データ破棄済み",
         _ => "不明",
     }
 }

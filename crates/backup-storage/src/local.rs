@@ -152,6 +152,46 @@ impl Staging {
             .join(backup_core::manifest::MANIFEST_FILE_NAME))
     }
 
+    /// ユーザーが指定した1ファイルだけを削除する。ディレクトリ・リンク・別ボリュームは拒否。
+    pub fn remove_file(&self, session_id: &str, dest_rel: &str) -> Result<(), StagingError> {
+        let path = self.final_path(session_id, dest_rel)?;
+        let session = self.session_dir(session_id)?;
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        if is_link_like(&meta) || !meta.is_file() {
+            return Err(StagingError::InvalidPath(dest_rel.into()));
+        }
+        if !owned_by_current_user(&meta) {
+            return Err(StagingError::WrongOwner(path));
+        }
+        let canonical = fs::canonicalize(&path)?;
+        if canonical != path || !canonical.starts_with(&session) {
+            return Err(StagingError::OutsideRoot(canonical));
+        }
+        let mut current = Some(path.as_path());
+        while let Some(p) = current {
+            let meta = fs::symlink_metadata(p)?;
+            if is_link_like(&meta) {
+                return Err(StagingError::Symlink(p.into()));
+            }
+            if self.crosses_boundary(&meta, p)? {
+                return Err(StagingError::MountBoundary(p.into()));
+            }
+            if p == session {
+                break;
+            }
+            current = p.parent();
+        }
+        fs::remove_file(&path)?;
+        if let Some(parent) = path.parent() {
+            crate::sync_dir(parent)?;
+        }
+        Ok(())
+    }
+
     /// 全セッションの `.partial` 内の残骸を破棄する（起動時の復旧）。
     pub fn clear_partials(&self) -> Result<usize, StagingError> {
         let mut removed = 0;
@@ -460,5 +500,31 @@ mod tests {
                 .register_session(SID, "sd1/../20261028112834")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn file_deletion_removes_only_the_selected_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = Staging::open(&dir.path().join("stage")).unwrap();
+        staging.register_session(SID, "sd1/20261028112834").unwrap();
+        let a = staging.final_path(SID, "DCIM/a.jpg").unwrap();
+        let b = staging.final_path(SID, "DCIM/b.jpg").unwrap();
+        fs::create_dir_all(a.parent().unwrap()).unwrap();
+        fs::write(&a, b"a").unwrap();
+        fs::write(&b, b"keep").unwrap();
+        assert!(staging.remove_file(SID, "../outside").is_err());
+        assert!(staging.remove_file(SID, "DCIM").is_err());
+        staging.remove_file(SID, "DCIM/a.jpg").unwrap();
+        staging.remove_file(SID, "DCIM/a.jpg").unwrap();
+        assert!(!a.exists());
+        assert_eq!(fs::read(&b).unwrap(), b"keep");
+        #[cfg(unix)]
+        {
+            let outside = dir.path().join("outside");
+            fs::write(&outside, b"protected").unwrap();
+            std::os::unix::fs::symlink(&outside, &a).unwrap();
+            assert!(staging.remove_file(SID, "DCIM/a.jpg").is_err());
+            assert_eq!(fs::read(outside).unwrap(), b"protected");
+        }
     }
 }

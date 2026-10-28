@@ -61,10 +61,10 @@ fn migrations_apply_and_are_idempotent() {
     let path = dir.path().join("state.sqlite");
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 2);
+        assert_eq!(db.schema_version().unwrap(), 3);
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 2);
+    assert_eq!(db.schema_version().unwrap(), 3);
     assert_eq!(db.quick_check().unwrap(), "ok");
 }
 
@@ -319,4 +319,204 @@ fn reset_file_removes_transfer() {
     assert_eq!(db.pending_transfer_count(&s.session_id).unwrap(), 0);
     let f = db.get_file(&f.file_id).unwrap().unwrap();
     assert_eq!(f.stage_state, StageState::Discovered);
+}
+
+fn ready_for_nas(db: &Db, sid: &str) {
+    for state in [
+        SessionState::Scanning,
+        SessionState::Copying,
+        SessionState::SourceFinalizing,
+        SessionState::Unmounting,
+        SessionState::MediaGreen,
+        SessionState::NasPending,
+    ] {
+        db.transition_session(sid, state).unwrap();
+    }
+    db.set_scan_completed(sid, true).unwrap();
+}
+
+#[test]
+fn selected_nas_cancel_survives_recovery_and_bulk_retry_until_explicit_resume() {
+    let (db, _, partition, session) = setup();
+    let a = db
+        .insert_file(&new_file(&session.session_id, &partition, "A.JPG"))
+        .unwrap();
+    let b = db
+        .insert_file(&new_file(&session.session_id, &partition, "B.JPG"))
+        .unwrap();
+    for f in [&a, &b] {
+        db.mark_file_ssd_verified(&f.file_id, &"a".repeat(64))
+            .unwrap();
+    }
+    ready_for_nas(&db, &session.session_id);
+    db.manage_nas_files(&session.session_id, std::slice::from_ref(&a.file_id), false)
+        .unwrap();
+    assert_eq!(
+        db.get_file(&a.file_id).unwrap().unwrap().nas_state,
+        NasFileState::Cancelled
+    );
+    assert_eq!(
+        db.get_file(&b.file_id).unwrap().unwrap().nas_state,
+        NasFileState::Queued
+    );
+    assert_eq!(db.nas_queue_stats().unwrap().cancelled_files, 1);
+    assert_eq!(db.nas_queue_stats().unwrap().queued_files, 1);
+    assert_eq!(db.retry_all_transfers_now().unwrap(), 0);
+    db.recover_after_restart().unwrap();
+    assert_eq!(
+        db.get_file(&a.file_id).unwrap().unwrap().nas_state,
+        NasFileState::Cancelled
+    );
+    assert_eq!(db.pending_transfer_count(&session.session_id).unwrap(), 2);
+    db.manage_nas_files(&session.session_id, std::slice::from_ref(&a.file_id), true)
+        .unwrap();
+    assert_eq!(
+        db.get_file(&a.file_id).unwrap().unwrap().nas_state,
+        NasFileState::Queued
+    );
+}
+
+#[test]
+fn nas_selection_rejects_partial_batches_cross_session_and_verified_files() {
+    let (db, device, partition, s) = setup();
+    let a = db
+        .insert_file(&new_file(&s.session_id, &partition, "A.JPG"))
+        .unwrap();
+    let b = db
+        .insert_file(&new_file(&s.session_id, &partition, "B.JPG"))
+        .unwrap();
+    for f in [&a, &b] {
+        db.mark_file_ssd_verified(&f.file_id, &"b".repeat(64))
+            .unwrap();
+    }
+    ready_for_nas(&db, &s.session_id);
+    let other = db
+        .create_session(&device, Confidence::High, chrono::Utc::now(), "Asia/Tokyo")
+        .unwrap();
+    assert!(
+        db.manage_nas_files(&other.session_id, std::slice::from_ref(&a.file_id), false)
+            .is_err()
+    );
+    assert!(
+        db.manage_nas_files(
+            &s.session_id,
+            &[a.file_id.clone(), "missing-file".into()],
+            false
+        )
+        .is_err()
+    );
+    assert_eq!(
+        db.get_file(&a.file_id).unwrap().unwrap().nas_state,
+        NasFileState::Queued
+    );
+    let job = db.next_due_transfer(&now_utc()).unwrap().unwrap();
+    db.transfer_started(&job, ".temp").unwrap();
+    assert!(
+        db.manage_nas_files(&s.session_id, std::slice::from_ref(&job.file_id), false)
+            .is_err()
+    );
+    db.transfer_verified(&job, "file://nas").unwrap();
+    assert!(
+        db.manage_nas_files(
+            &s.session_id,
+            &[a.file_id.clone(), b.file_id.clone()],
+            false
+        )
+        .is_err()
+    );
+    let untouched = if job.file_id == a.file_id {
+        &b.file_id
+    } else {
+        &a.file_id
+    };
+    assert_eq!(
+        db.get_file(untouched).unwrap().unwrap().nas_state,
+        NasFileState::Queued
+    );
+}
+
+#[test]
+fn file_pages_include_nas_attempts_errors_and_total_without_losing_later_files() {
+    let (db, _, partition, s) = setup();
+    for name in ["A.JPG", "B.JPG", "C.JPG"] {
+        let f = db
+            .insert_file(&new_file(&s.session_id, &partition, name))
+            .unwrap();
+        db.mark_file_ssd_verified(&f.file_id, &"c".repeat(64))
+            .unwrap();
+    }
+    let job = db.next_due_transfer(&now_utc()).unwrap().unwrap();
+    db.transfer_started(&job, ".temp").unwrap();
+    let next = to_db_time(chrono::Utc::now() + chrono::Duration::hours(1));
+    db.transfer_retry(&job, "NAS の容量不足", &next).unwrap();
+    let page = db.files_page(&s.session_id, true, 0, 1).unwrap();
+    assert_eq!(page.total, 3);
+    assert_eq!(page.files.len(), 1);
+    assert_eq!(page.files[0].1.attempts, 1);
+    assert_eq!(page.files[0].1.next_attempt_utc, Some(next));
+    assert_eq!(
+        page.files[0].1.last_error.as_deref(),
+        Some("NAS の容量不足")
+    );
+    let later = db.files_page(&s.session_id, true, 2, 1).unwrap();
+    assert_eq!(later.files[0].0.source_rel_path, "C.JPG");
+    assert_eq!(later.total, 3);
+    db.transfer_verified(&job, "file://nas").unwrap();
+    assert_eq!(db.files_page(&s.session_id, true, 0, 10).unwrap().total, 2);
+    assert_eq!(db.files_page(&s.session_id, false, 0, 10).unwrap().total, 3);
+}
+
+#[test]
+fn local_file_deletion_removes_queue_before_unlink_and_never_requeues_deleted_files() {
+    let (db, _, partition, session) = setup();
+    let a = db
+        .insert_file(&new_file(&session.session_id, &partition, "A.JPG"))
+        .unwrap();
+    let b = db
+        .insert_file(&new_file(&session.session_id, &partition, "B.JPG"))
+        .unwrap();
+    for f in [&a, &b] {
+        db.mark_file_ssd_verified(&f.file_id, &"d".repeat(64))
+            .unwrap();
+    }
+    ready_for_nas(&db, &session.session_id);
+    assert!(
+        db.prepare_nas_file_deletion(&session.session_id, &[a.file_id.clone(), "invalid".into()])
+            .is_err()
+    );
+    assert_eq!(db.pending_transfer_count(&session.session_id).unwrap(), 2);
+    let pending = db
+        .prepare_nas_file_deletion(&session.session_id, std::slice::from_ref(&a.file_id))
+        .unwrap();
+    assert_eq!(pending[0].stage_state, StageState::DeletePending);
+    assert_eq!(db.pending_transfer_count(&session.session_id).unwrap(), 1);
+    assert_eq!(
+        db.get_session(&session.session_id).unwrap().unwrap().state,
+        SessionState::NeedsAttention
+    );
+    db.recover_after_restart().unwrap();
+    assert_eq!(
+        db.next_due_transfer(&now_utc()).unwrap().unwrap().file_id,
+        b.file_id
+    );
+    assert!(
+        db.manage_nas_files(&session.session_id, std::slice::from_ref(&a.file_id), true)
+            .is_err()
+    );
+    db.finish_nas_file_deletion(&a.file_id).unwrap();
+    db.refresh_discovered_file(&a.file_id, 10, Some(1)).unwrap();
+    assert_eq!(
+        db.get_file(&a.file_id).unwrap().unwrap().stage_state,
+        StageState::Discarded
+    );
+    assert_eq!(
+        db.get_file(&a.file_id).unwrap().unwrap().nas_state,
+        NasFileState::Deleted
+    );
+    assert_eq!(
+        db.refresh_session_counters(&session.session_id)
+            .unwrap()
+            .failed_files,
+        1
+    );
 }

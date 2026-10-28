@@ -94,13 +94,18 @@ pub fn build(shared: &Shared) -> Snapshot {
     let configured = cfg.nas.mode != backup_config::NasMode::Disabled
         || shared.overrides.nas_local_dir.is_some();
     let nas = NasView {
+        cancelled_files: stats.cancelled_files,
         configured,
         connected: rt.nas.connected,
         target: match &shared.overrides.nas_local_dir {
             Some(d) => format!("開発用ディレクトリ {}", d.display()),
             None => cfg.nas.display_target(),
         },
-        status_text: rt.nas.status_text.clone(),
+        status_text: if stats.cancelled_files > 0 && stats.queued_files == 0 {
+            format!("中止した転送 {} 件／PC に保持中", stats.cancelled_files)
+        } else {
+            rt.nas.status_text.clone()
+        },
         free_bytes: rt.nas.space.map(|s| s.free_bytes),
         total_bytes: rt.nas.space.map(|s| s.total_bytes),
         current_file: rt.nas.current_file.clone(),
