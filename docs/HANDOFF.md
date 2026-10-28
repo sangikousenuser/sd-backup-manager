@@ -9,7 +9,7 @@ Windows での読み替えは [windows.md](windows.md)）。
 
 ## 1. 現在の状態
 
-未リリース変更（2026-10-28）: 新規セッションは SSD/NAS とも `sdN/14桁日時/` に元の全構成を保存し、
+v0.3.0（2026-10-28）: 新規セッションは SSD/NAS とも `sdN/14桁日時/` に元の全構成を保存し、
 毎回全ファイルをコピーする。複数パーティションは `P01/` 等で区別し、空フォルダも DB/manifest に記録する。
 カード番号の永続化は `migrations/0002_cards.sql`。旧セッションは旧パスと分類方式を維持して再開する。
 SD/MMC シリアルが取得できる場合のみフォーマット後の番号を再利用し、USB リーダー等では新番号になる。
@@ -18,7 +18,7 @@ GUI に PC 内の保存先表示・開くボタンを追加。シミュレータ
 | 項目 | 状態 |
 |---|---|
 | Linux（Ubuntu 26.04）版 | v0.1.0 をリリース済み（.deb / tar.gz / install.sh）。実機にインストールし、デーモン起動と `doctor` まで確認済み。SD カード・NAS での受け入れ試験は未実施 |
-| Windows 版 | v0.2.0 でリリース（Setup.exe・zip）。GitHub Actions の windows-latest で clippy・単体テスト・E2E（シミュレータ）・Setup.exe 作成まで成功。CI の成果物 `sd-backup-manager-windows-x64` からも Setup.exe を取得できる。**Windows 実機での動作確認は未実施** |
+| Windows 版 | v0.3.0 でリリース（Setup.exe・zip）。GitHub Actions の windows-latest で clippy・単体テスト・E2E（シミュレータ）・Setup.exe 作成まで成功。CI の成果物 `sd-backup-manager-windows-x64` からも Setup.exe を取得できる。**Windows 実機での動作確認は未実施** |
 | macOS | 開発用。シミュレータでのみ動作（実機メディアは扱わない） |
 | CI | `.github/workflows/ci.yml`: fmt / clippy + test（Linux・macOS・Windows）/ cargo audit / Ubuntu 26.04 コンテナでのリリースビルド / Windows リリースビルド（zip + Setup.exe） |
 | リリース | `v*` タグの push で `.github/workflows/release.yml` が Linux（.deb, tar.gz）と Windows（Setup.exe, zip）を GitHub Releases に公開 |
@@ -194,3 +194,4 @@ CI（windows-latest）で確認できるのは、コンパイル・clippy・単�
 | 2026-10-27 | Windows へ移植（名前付きパイプ・Win32 デバイス・UNC/WNet・Inno Setup・Windows CI） |
 | 2026-10-27 | cargo audit が RUSTSEC-2026-0385（ctutils 0.4.3）で失敗 → `cargo update -p ctutils` で 0.4.6 に更新 |
 | 2026-10-27 | v0.2.0 リリース（Windows 版の初回公開） |
+| 2026-10-28 | v0.3.0 リリース（SD 全体の保存・カード別フォルダ、PC 内保存先を開くボタン） |
