@@ -191,7 +191,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             ) {
                 file = file.push(
                     text(format!(
-                        "PC への取り込み: {}（NAS 操作の対象外）",
+                        "PC への取り込み: {}（NAS 再試行には再取り込みが必要）",
                         f.stage_state
                     ))
                     .size(12)

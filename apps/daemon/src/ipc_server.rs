@@ -335,9 +335,15 @@ async fn manage_nas_files(
                 return Err("PC 内のコピーは削除済みです。NAS 再試行の対象にはできません".into());
             }
             if f.session_id != sid
-                || !(f.stage_state == backup_core::state::StageState::SsdVerified
-                    || (action == backup_ipc::NasFileAction::DeleteLocal
-                        && f.stage_state == backup_core::state::StageState::DeletePending))
+                || (if action == backup_ipc::NasFileAction::DeleteLocal {
+                    matches!(
+                        f.stage_state,
+                        backup_core::state::StageState::SkippedVerified
+                            | backup_core::state::StageState::Discarded
+                    )
+                } else {
+                    f.stage_state != backup_core::state::StageState::SsdVerified
+                })
                 || f.nas_state == backup_core::state::NasFileState::NasVerified
             {
                 return Err("別のセッションや NAS 検証済みファイルは操作できません".into());

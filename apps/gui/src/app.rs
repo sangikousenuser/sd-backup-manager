@@ -513,12 +513,8 @@ impl App {
 }
 
 pub fn file_is_actionable(f: &FileSummary) -> bool {
-    f.stage_state == "DELETE_PENDING"
-        || (f.stage_state == "SSD_VERIFIED"
-            && matches!(
-                f.nas_state.as_str(),
-                "QUEUED" | "UPLOADING" | "VERIFYING" | "RETRY_WAIT" | "NAS_FAILED" | "CANCELLED"
-            ))
+    !matches!(f.stage_state.as_str(), "SKIPPED_VERIFIED" | "DISCARDED")
+        && f.nas_state != "NAS_VERIFIED"
 }
 
 #[cfg(test)]

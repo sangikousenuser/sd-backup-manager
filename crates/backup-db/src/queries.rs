@@ -1010,9 +1010,9 @@ impl Db {
                 .ok_or_else(|| DbError::NotFound(id.clone()))?;
             if !unique.insert(id)
                 || f.session_id != sid
-                || !matches!(
+                || matches!(
                     f.stage_state,
-                    StageState::SsdVerified | StageState::DeletePending
+                    StageState::SkippedVerified | StageState::Discarded
                 )
                 || matches!(
                     f.nas_state,

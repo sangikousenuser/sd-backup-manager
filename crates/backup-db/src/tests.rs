@@ -519,4 +519,11 @@ fn local_file_deletion_removes_queue_before_unlink_and_never_requeues_deleted_fi
             .failed_files,
         1
     );
+    // NAS 転送が PC コピーの破損で停止し、再取り込み待ちになった場合も選択削除できる。
+    db.reset_file_to_discovered(&b.file_id, "PC コピーが破損しています")
+        .unwrap();
+    let pending = db
+        .prepare_nas_file_deletion(&session.session_id, std::slice::from_ref(&b.file_id))
+        .unwrap();
+    assert_eq!(pending[0].stage_state, StageState::DeletePending);
 }
