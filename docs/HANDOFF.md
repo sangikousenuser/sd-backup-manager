@@ -1,6 +1,6 @@
 # 引き継ぎ資料（Windows で開発を続ける人・AI 向け）
 
-最終更新: 2026-10-28。このファイルと [CLAUDE.md](../CLAUDE.md) を読めば、Windows 端末上で
+最終更新: 2026-10-29。このファイルと [CLAUDE.md](../CLAUDE.md) を読めば、Windows 端末上で
 開発を再開できるようにまとめています。仕様の正本は
 [SD_Backup_Manager_Requirements_v1.0.md](SD_Backup_Manager_Requirements_v1.0.md)（Ubuntu 前提で書かれている。
 Windows での読み替えは [windows.md](windows.md)）。
@@ -9,7 +9,7 @@ Windows での読み替えは [windows.md](windows.md)）。
 
 ## 1. 現在の状態
 
-v0.4.0（CI 配布・未正式リリース、2026-10-28）: NAS のファイル別再試行・中止・PC コピーと転送キューの削除を追加。
+v0.4.0（2026-10-29）: NAS のファイル別再試行・中止・PC コピーと転送キューの削除を追加。
 `migrations/0003_nas_file_controls.sql` で DB v3 に更新する。
 `DELETE_PENDING` を記録してから PC ファイルを削除し、起動時に `file_actions` で削除を再開する。
 NAS ワーカーとユーザー操作は `nas_operation`、SD のセッション再開と削除は `media_session_operation` で排他にする。

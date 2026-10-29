@@ -25,6 +25,9 @@ jobs:
           apt-get install -y --no-install-recommends build-essential curl ca-certificates pkg-config git
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ubuntu-2604
       - name: Version tag matches Cargo.toml
         run: |
           v=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
@@ -45,6 +48,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-release
       - run: cargo test --workspace --locked
       - run: cargo build --release --workspace --locked
       - name: Package (zip + Inno Setup installer)
