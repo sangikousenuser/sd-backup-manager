@@ -24,8 +24,8 @@ GUI に PC 内の保存先表示・開くボタンを追加。シミュレータ
 
 | 項目 | 状態 |
 |---|---|
-| Linux（Ubuntu 26.04）版 | v0.1.0 をリリース済み（.deb / tar.gz / install.sh）。実機にインストールし、デーモン起動と `doctor` まで確認済み。SD カード・NAS での受け入れ試験は未実施 |
-| Windows 版 | v0.3.0 でリリース（Setup.exe・zip）。GitHub Actions の windows-latest で clippy・単体テスト・E2E（シミュレータ）・Setup.exe 作成まで成功。CI の成果物 `sd-backup-manager-windows-x64` からも Setup.exe を取得できる。**Windows 実機での動作確認は未実施** |
+| Linux（Ubuntu 26.04）版 | v0.4.0 を配布（.deb / tar.gz / install.sh）。実機にインストールしてデーモン起動と `doctor` を確認したのは v0.1.0。SD カード・NAS での実機受け入れ試験は未実施 |
+| Windows 版 | v0.4.0 を正式 Release で配布（Setup.exe・zip）。GitHub Actions の windows-latest で clippy・単体テスト・E2E（シミュレータ）・Setup.exe 作成まで確認。**Windows 実機での動作確認は未実施** |
 | macOS | 開発用。シミュレータでのみ動作（実機メディアは扱わない） |
 | CI | `.github/workflows/ci.yml`: fmt / clippy + test（Linux・macOS・Windows）/ cargo audit / Ubuntu 26.04 コンテナでのリリースビルド / Windows リリースビルド（zip + Setup.exe） |
 | リリース | `v*` タグの push で `.github/workflows/release.yml` が Linux（.deb, tar.gz）と Windows（Setup.exe, zip）を GitHub Releases に公開 |
@@ -202,3 +202,4 @@ CI（windows-latest）で確認できるのは、コンパイル・clippy・単�
 | 2026-10-27 | cargo audit が RUSTSEC-2026-0385（ctutils 0.4.3）で失敗 → `cargo update -p ctutils` で 0.4.6 に更新 |
 | 2026-10-27 | v0.2.0 リリース（Windows 版の初回公開） |
 | 2026-10-28 | v0.3.0 リリース（SD 全体の保存・カード別フォルダ、PC 内保存先を開くボタン） |
+| 2026-10-29 | v0.4.0 を正式 Release で配布（NAS 転送のファイル別再試行・中止・PC コピーと転送キューの削除）。CI 成果物のみの配布から、通常の最新版ダウンロードを更新 |
