@@ -87,6 +87,13 @@ impl Staging {
         &self.root
     }
 
+    pub fn forget_sessions(&self) {
+        self.folders
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
     pub fn session_dir(&self, session_id: &str) -> Result<PathBuf, StagingError> {
         if !is_valid_session_id(session_id) {
             return Err(StagingError::InvalidSessionId(session_id.to_string()));

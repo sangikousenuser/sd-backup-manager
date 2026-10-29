@@ -103,7 +103,35 @@ async fn handle_connection(
 }
 
 async fn handle_command(shared: &Arc<Shared>, command: Command) -> Result<Response, String> {
+    // 一括削除中に再開・設定変更・ファイル操作が割り込まないようにする。
+    let _maintenance = if matches!(&command, Command::ResetLocalData { .. }) {
+        None
+    } else {
+        Some(shared.maintenance.read().await)
+    };
+    if shared
+        .local_reset_pending
+        .load(std::sync::atomic::Ordering::SeqCst)
+        && !matches!(
+            &command,
+            Command::GetState
+                | Command::Subscribe
+                | Command::GetSettings
+                | Command::GetLocalDataSummary
+                | Command::ResetLocalData { .. }
+                | Command::ListSessions { .. }
+                | Command::GetFiles { .. }
+                | Command::ListEvents { .. }
+                | Command::Shutdown
+        )
+    {
+        return Err("一括削除が未完了です。設定から削除を再実行してください。完了するまで通常処理は再開できません".into());
+    }
     match command {
+        Command::GetLocalDataSummary => crate::reset::preview(shared).await,
+        Command::ResetLocalData { confirmation_token } => {
+            crate::reset::execute(shared, confirmation_token).await
+        }
         Command::GetState | Command::Subscribe => Ok(Response::State {
             snapshot: Box::new(crate::snapshot::build(shared)),
         }),

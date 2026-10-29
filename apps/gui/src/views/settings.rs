@@ -174,6 +174,50 @@ pub fn view(app: &App) -> Element<'_, Message> {
     ]
     .spacing(6);
 
+    let mut reset = column![
+        text("PC 内データをまとめて削除").size(18).color(theme::RED),
+        text("未送信分を含む PC 内の一時コピー、すべての転送キュー・送信履歴・識別キャッシュ・過去の診断ログを削除します。取り消しはできません。").size(13),
+        text("NAS の接続設定・保存済みパスワード・通知設定は保持します。元の SD と NAS 上のファイルは削除しません。").size(13),
+        text("SD・USB メディアをすべて取り外し、取り込み処理が終了してから実行してください。完了後は一時停止状態になります。").size(13),
+    ].spacing(8);
+    if let Some(summary) = &app.local_reset_summary {
+        if summary.reset_pending {
+            reset = reset.push(
+                text("前回の一括削除が未完了です。以下の操作で続きを実行します。")
+                    .color(theme::YELLOW),
+            );
+        }
+        reset = reset
+            .push(text(format!("削除対象: {} セッション / {} ファイル、PC 内コピー 約 {}", summary.sessions, summary.files, format_bytes(summary.local_bytes))))
+            .push(text(format!("転送キュー {} 件 / 送信キャッシュ {} 件 / メディア識別 {} 件 / 履歴イベント {} 件", summary.transfers, summary.catalog_entries, summary.devices, summary.events)).size(13))
+            .push(text("確認のため「削除」と入力してください（確認は5分間有効）。実行時の全データが対象です。").size(13))
+            .push(text_input("削除", &app.local_reset_text).on_input(Message::LocalResetText));
+        let mut confirm = button(text("PC 内データと履歴をすべて削除する")).style(button::danger);
+        if app.local_reset_text == "削除" && !app.busy {
+            confirm = confirm.on_press(Message::ConfirmLocalReset);
+        }
+        reset = reset.push(
+            row![
+                confirm,
+                button(text("キャンセル"))
+                    .on_press(Message::CancelLocalReset)
+                    .style(button::secondary)
+            ]
+            .spacing(8),
+        );
+    } else {
+        let mut preview = button(text(if app.local_reset_loading {
+            "削除対象を確認中…"
+        } else {
+            "削除対象を確認…"
+        }))
+        .style(button::danger);
+        if !app.local_reset_loading && !app.busy {
+            preview = preview.on_press(Message::RequestLocalReset);
+        }
+        reset = reset.push(preview);
+    }
+
     scrollable(
         column![
             container(nas)
@@ -188,6 +232,10 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .padding(12)
                 .width(Fill)
                 .style(theme::card(theme::GRAY)),
+            container(reset)
+                .padding(12)
+                .width(Fill)
+                .style(theme::card(theme::RED)),
         ]
         .spacing(12),
     )

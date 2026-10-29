@@ -61,11 +61,39 @@ fn migrations_apply_and_are_idempotent() {
     let path = dir.path().join("state.sqlite");
     {
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 3);
+        assert_eq!(db.schema_version().unwrap(), 4);
     }
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 3);
+    assert_eq!(db.schema_version().unwrap(), 4);
     assert_eq!(db.quick_check().unwrap(), "ok");
+}
+
+#[test]
+fn local_reset_is_transactional_and_keeps_schema_and_card_high_water_mark() {
+    let (mut db, device, partition, session) = setup();
+    let card = db.assign_card(&device, None, None).unwrap();
+    db.insert_file(&new_file(&session.session_id, &partition, "reset.jpg"))
+        .unwrap();
+    db.log_event(Some(&session.session_id), "info", "test", "history")
+        .unwrap();
+    assert!(db.finish_local_reset().is_err());
+    db.begin_local_reset().unwrap();
+    db.conn.execute_batch("CREATE TRIGGER reset_failure BEFORE DELETE ON devices BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
+    assert!(db.finish_local_reset().is_err());
+    assert!(db.local_reset_pending().unwrap());
+    assert_eq!(db.local_data_counts().unwrap().sessions, 1);
+    assert_eq!(db.local_data_counts().unwrap().files, 1);
+    assert_eq!(db.local_data_counts().unwrap().events, 1);
+    db.conn.execute_batch("DROP TRIGGER reset_failure").unwrap();
+    db.finish_local_reset().unwrap();
+    assert!(!db.local_reset_pending().unwrap());
+    assert_eq!(db.local_data_counts().unwrap(), LocalDataCounts::default());
+    assert_eq!(db.schema_version().unwrap(), 4);
+    assert_eq!(db.quick_check().unwrap(), "ok");
+    let m = media("fresh");
+    let device = db.upsert_device(&m, Confidence::High).unwrap();
+    let next = db.assign_card(&device.device_id, None, None).unwrap();
+    assert_ne!(card, next, "NAS 上の以前のカード番号を再利用しない");
 }
 
 #[test]

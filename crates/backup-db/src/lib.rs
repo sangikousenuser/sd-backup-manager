@@ -21,6 +21,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         3,
         include_str!("../../../migrations/0003_nas_file_controls.sql"),
     ),
+    (4, include_str!("../../../migrations/0004_local_reset.sql")),
 ];
 
 #[derive(Debug, Error)]

@@ -62,6 +62,27 @@ pub fn purge_old_logs(log_dir: &Path, days: u64) {
     }
 }
 
+/// 一括削除用。アプリ自身のログだけを空にする（動作中のログは以後も記録される）。
+pub fn clear_logs(log_dir: &Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(log_dir)?;
+    if backup_storage::platform::is_link_like(&meta) || !meta.is_dir() {
+        return Err(std::io::Error::other(
+            "ログフォルダが通常のディレクトリではありません",
+        ));
+    }
+    for entry in std::fs::read_dir(log_dir)? {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("daemon.log")
+        {
+            backup_storage::platform::truncate_owned_regular(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 /// 機密情報を除いた診断情報を `dest_dir/sdbm-diagnostics-<時刻>/` に書き出す。
 pub fn export_diagnostics(shared: &Shared, dest_dir: &Path) -> anyhow::Result<PathBuf> {
     if !dest_dir.is_absolute() || !dest_dir.is_dir() {

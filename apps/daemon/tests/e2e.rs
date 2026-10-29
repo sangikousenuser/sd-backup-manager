@@ -864,6 +864,247 @@ async fn nas_file_command(
     .map_err(|e| e.to_string())
 }
 
+async fn reset_preview(e: &Env) -> backup_ipc::LocalDataSummary {
+    let response = backup_ipc::one_shot(
+        &AppPaths::under(&e.base).socket_path(),
+        "reset-test",
+        backup_ipc::Command::GetLocalDataSummary,
+    )
+    .await
+    .unwrap();
+    let backup_ipc::Response::LocalDataSummary { summary } = response else {
+        panic!("reset summary expected")
+    };
+    summary
+}
+
+async fn reset_confirm(
+    e: &Env,
+    token: String,
+) -> Result<backup_ipc::Response, backup_ipc::IpcError> {
+    backup_ipc::one_shot(
+        &AppPaths::under(&e.base).socket_path(),
+        "reset-test",
+        backup_ipc::Command::ResetLocalData {
+            confirmation_token: token,
+        },
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reset_all_local_data_keeps_nas_source_settings_and_allows_fresh_import() {
+    let e = env();
+    let token = CancellationToken::new();
+    let shared = start(
+        options(
+            &e,
+            Overrides {
+                nas_local_dir: Some(e.nas.clone()),
+                ..Default::default()
+            },
+        ),
+        token.clone(),
+    )
+    .await
+    .unwrap();
+    // 一度送信済みの履歴・カタログと、その後の未送信コピーを両方作る。
+    make_card(&e.media, "sent");
+    wait_until("sent", Duration::from_secs(30), || {
+        session_of_slot(&shared, 0)
+            .is_some_and(|sid| session_state(&shared, &sid) == SessionState::Complete)
+    })
+    .await;
+    remove_retry(e.media.join("sent")).unwrap();
+    wait_until("removed", Duration::from_secs(10), || {
+        slot_phase(&shared, 0).is_none()
+    })
+    .await;
+    let saved_nas = e.base.join("saved-nas");
+    rename_retry(&e.nas, &saved_nas).unwrap();
+    let nas_files = find_files(&saved_nas)
+        .into_iter()
+        .map(|p| {
+            let bytes = fs::read(saved_nas.join(&p)).unwrap();
+            (p, bytes)
+        })
+        .collect::<Vec<_>>();
+    make_card(&e.media, "pending");
+    wait_until("pending local copy", Duration::from_secs(20), || {
+        slot_phase(&shared, 0) == Some(SlotPhase::DoneGreen)
+    })
+    .await;
+    let sid = session_of_slot(&shared, 0).unwrap();
+    let source_bytes = fs::read(e.media.join("pending/p1/README.TXT")).unwrap();
+    let source_saved = e.base.join("source-kept");
+    let mut config = shared.config();
+    config.nas.mode = backup_config::NasMode::Gvfs;
+    config.nas.url = "smb://kept.invalid/backup".into();
+    config.nas.username = "kept-user".into();
+    config.nas.target_id = "kept-target".into();
+    config.save(&shared.paths.config_file()).unwrap();
+    *shared.config.write().unwrap() = config.clone();
+    let config_bytes = fs::read(shared.paths.config_file()).unwrap();
+    fs::write(
+        shared.paths.log_dir.join("daemon.log.old"),
+        "old diagnostic history",
+    )
+    .unwrap();
+    fs::write(e.staging.join("unrelated.txt"), "keep unrelated data").unwrap();
+    let summary = reset_preview(&e).await;
+    assert_eq!(summary.sessions, 2);
+    assert!(summary.catalog_entries > 0 && summary.transfers > 0 && summary.local_bytes > 0);
+    assert!(reset_confirm(&e, "invalid".into()).await.is_err());
+    let summary = reset_preview(&e).await;
+    assert!(
+        reset_confirm(&e, summary.confirmation_token).await.is_err(),
+        "接続中の SD があれば削除しない"
+    );
+    assert!(shared.staging.session_dir(&sid).unwrap().exists());
+    rename_retry(e.media.join("pending"), &source_saved).unwrap();
+    wait_until(
+        "source removed before reset",
+        Duration::from_secs(10),
+        || slot_phase(&shared, 0).is_none(),
+    )
+    .await;
+    // NAS の処理がロックを解放するまで、PC の削除は始めない。
+    let operation = shared.nas_operation.lock().await;
+    let summary = reset_preview(&e).await;
+    let socket = shared.paths.socket_path();
+    let confirmation_token = summary.confirmation_token;
+    let reset = tokio::spawn(async move {
+        backup_ipc::one_shot(
+            &socket,
+            "reset-test",
+            backup_ipc::Command::ResetLocalData { confirmation_token },
+        )
+        .await
+    });
+    wait_until("reset stops workers", Duration::from_secs(5), || {
+        shared.is_paused()
+    })
+    .await;
+    assert!(shared.staging.session_dir(&sid).unwrap().exists());
+    drop(operation);
+    reset.await.unwrap().unwrap();
+    assert_eq!(
+        shared.db().local_data_counts().unwrap(),
+        backup_db::LocalDataCounts::default()
+    );
+    assert_eq!(shared.db().schema_version().unwrap(), 4);
+    assert!(shared.is_paused());
+    assert!(!shared.db().local_reset_pending().unwrap());
+    assert!(!shared.staging.session_dir(&sid).unwrap().exists());
+    assert_eq!(fs::read(shared.paths.config_file()).unwrap(), config_bytes);
+    assert_eq!(shared.config(), config);
+    assert!(
+        fs::read(shared.paths.log_dir.join("daemon.log.old"))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        fs::read(source_saved.join("p1/README.TXT")).unwrap(),
+        source_bytes
+    );
+    assert_eq!(
+        fs::read_to_string(e.staging.join("unrelated.txt")).unwrap(),
+        "keep unrelated data"
+    );
+    for (p, bytes) in nas_files {
+        assert_eq!(fs::read(saved_nas.join(p)).unwrap(), bytes);
+    }
+    backup_ipc::one_shot(
+        &shared.paths.socket_path(),
+        "reset-test",
+        backup_ipc::Command::Resume,
+    )
+    .await
+    .unwrap();
+    make_card(&e.media, "fresh");
+    wait_until("fresh import after reset", Duration::from_secs(20), || {
+        slot_phase(&shared, 0) == Some(SlotPhase::DoneGreen)
+    })
+    .await;
+    let fresh = shared
+        .db()
+        .get_session(&session_of_slot(&shared, 0).unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(
+        fresh.folder_name.starts_with("sd3/"),
+        "{}",
+        fresh.folder_name
+    );
+    shutdown(shared, token).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupted_local_reset_stays_stopped_until_deletion_can_finish() {
+    let e = env();
+    let opts = || {
+        options(
+            &e,
+            Overrides {
+                nas_local_dir: Some(e.base.join("offline")),
+                ..Default::default()
+            },
+        )
+    };
+    let token = CancellationToken::new();
+    let shared = start(opts(), token.clone()).await.unwrap();
+    make_card(&e.media, "reset-crash");
+    wait_until("local copy", Duration::from_secs(20), || {
+        slot_phase(&shared, 0) == Some(SlotPhase::DoneGreen)
+    })
+    .await;
+    let sid = session_of_slot(&shared, 0).unwrap();
+    let session_dir = shared.staging.session_dir(&sid).unwrap();
+    remove_retry(e.media.join("reset-crash")).unwrap();
+    wait_until("source removed", Duration::from_secs(10), || {
+        slot_phase(&shared, 0).is_none()
+    })
+    .await;
+    // 削除意図を記録した直後の停止と、起動時の削除失敗を再現する。
+    shared.db().begin_local_reset().unwrap();
+    shutdown(shared, token).await;
+    let parked = e.base.join("parked-copy");
+    rename_retry(&session_dir, &parked).unwrap();
+    fs::write(&session_dir, "deletion blocker").unwrap();
+    let token = CancellationToken::new();
+    let shared = start(opts(), token.clone()).await.unwrap();
+    assert!(shared.is_paused());
+    assert!(shared.db().local_reset_pending().unwrap());
+    assert_eq!(shared.db().local_data_counts().unwrap().sessions, 1);
+    assert!(
+        backup_ipc::one_shot(
+            &shared.paths.socket_path(),
+            "reset-test",
+            backup_ipc::Command::Resume
+        )
+        .await
+        .is_err()
+    );
+    let summary = reset_preview(&e).await;
+    assert!(summary.reset_pending);
+    assert!(reset_confirm(&e, summary.confirmation_token).await.is_err());
+    assert!(shared.db().get_session(&sid).unwrap().is_some());
+    fs::remove_file(&session_dir).unwrap();
+    rename_retry(&parked, &session_dir).unwrap();
+    // 次の起動で残りを完了する。履歴は実体を削除した後にだけ消える。
+    shutdown(shared, token).await;
+    let token = CancellationToken::new();
+    let shared = start(opts(), token.clone()).await.unwrap();
+    assert!(!shared.db().local_reset_pending().unwrap());
+    assert_eq!(
+        shared.db().local_data_counts().unwrap(),
+        backup_db::LocalDataCounts::default()
+    );
+    assert!(!session_dir.exists());
+    assert!(shared.is_paused());
+    shutdown(shared, token).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn first_nas_setup_preserves_pending_copies_and_transfers_after_restart() {
     use backup_ipc::{Command, Response};

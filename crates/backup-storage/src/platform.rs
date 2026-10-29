@@ -69,6 +69,41 @@ pub fn create_new_private(path: &Path) -> io::Result<File> {
     o.open(path)
 }
 
+/// 自分の通常ファイルだけを空にする。リンク先を開かず、検証前には内容を変更しない。
+pub fn truncate_owned_regular(path: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(path)?;
+    if !meta.is_file() || is_link_like(&meta) || !owned_by_current_user(&meta) {
+        return Err(io::Error::other("自分の通常ファイル以外は初期化しません"));
+    }
+    let mut options = OpenOptions::new();
+    options.write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .custom_flags((nix::fcntl::OFlag::O_NOFOLLOW | nix::fcntl::OFlag::O_NONBLOCK).bits());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+    }
+    let file = options.open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() || is_link_like(&meta) || !owned_by_current_user(&meta) {
+        return Err(io::Error::other("自分の通常ファイル以外は初期化しません"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.nlink() != 1 {
+            return Err(io::Error::other("ハードリンクは初期化しません"));
+        }
+    }
+    file.set_len(0)?;
+    file.sync_all()
+}
+
 /// 本人だけが入れるディレクトリを再帰的に作る。
 pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
     let mut b = fs::DirBuilder::new();
@@ -220,6 +255,32 @@ pub mod windows {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_truncation_only_changes_an_existing_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("log");
+        assert!(truncate_owned_regular(&file).is_err());
+        fs::write(&file, "old history").unwrap();
+        truncate_owned_regular(&file).unwrap();
+        assert!(fs::read(&file).unwrap().is_empty());
+        assert!(truncate_owned_regular(dir.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn log_truncation_refuses_links_and_keeps_their_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("target");
+        let link = dir.path().join("link");
+        let hardlink = dir.path().join("hardlink");
+        fs::write(&file, "keep").unwrap();
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        fs::hard_link(&file, &hardlink).unwrap();
+        assert!(truncate_owned_regular(&link).is_err());
+        assert!(truncate_owned_regular(&hardlink).is_err());
+        assert_eq!(fs::read(&file).unwrap(), b"keep");
+    }
 
     #[test]
     fn mtime_is_positive_for_new_files() {

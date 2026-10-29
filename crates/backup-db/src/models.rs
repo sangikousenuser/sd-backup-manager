@@ -3,6 +3,16 @@ use backup_core::identity::Confidence;
 use backup_core::state::{NasFileState, SessionNasState, SessionState, StageState};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LocalDataCounts {
+    pub sessions: u64,
+    pub files: u64,
+    pub transfers: u64,
+    pub catalog_entries: u64,
+    pub devices: u64,
+    pub events: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceRow {
     pub device_id: String,

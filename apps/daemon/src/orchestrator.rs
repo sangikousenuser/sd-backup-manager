@@ -56,6 +56,12 @@ fn on_added(shared: &Arc<Shared>, media: MediaDescriptor) {
     let name = media.display_name();
     let slot = {
         let mut rt = shared.rt();
+        if shared
+            .local_reset_pending
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return; // 削除中の挿入は受け付けない。完了後に挿し直してもらう。
+        }
         if rt.slot_of(&media.device_key).is_some()
             || rt
                 .waiting

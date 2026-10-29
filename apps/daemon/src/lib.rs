@@ -6,6 +6,7 @@ pub mod nas_backend;
 pub mod nas_worker;
 pub mod orchestrator;
 pub mod recovery;
+pub mod reset;
 pub mod scanner;
 pub mod snapshot;
 pub mod state;

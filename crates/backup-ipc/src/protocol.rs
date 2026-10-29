@@ -55,6 +55,10 @@ pub enum Command {
     Pause,
     Resume,
     GetSettings,
+    GetLocalDataSummary,
+    ResetLocalData {
+        confirmation_token: String,
+    },
     UpdateSettings {
         settings: SettingsView,
         password: Option<String>,
@@ -122,6 +126,22 @@ pub enum Response {
     NasTest {
         report: NasTestReport,
     },
+    LocalDataSummary {
+        summary: LocalDataSummary,
+    },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LocalDataSummary {
+    pub sessions: u64,
+    pub files: u64,
+    pub transfers: u64,
+    pub catalog_entries: u64,
+    pub devices: u64,
+    pub events: u64,
+    pub local_bytes: u64,
+    pub reset_pending: bool,
+    pub confirmation_token: String,
 }
 
 // ---------------------------------------------------------------------------

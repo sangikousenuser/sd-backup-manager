@@ -1,8 +1,8 @@
 use crate::ipc::{self, DaemonEvent};
 use crate::views;
 use backup_ipc::{
-    Command, EventSummary, FileSummary, NasFileAction, NasTestReport, NotificationKind, Response,
-    SessionSummary, SettingsView, Snapshot,
+    Command, EventSummary, FileSummary, LocalDataSummary, NasFileAction, NasTestReport,
+    NotificationKind, Response, SessionSummary, SettingsView, Snapshot,
 };
 use iced::{Element, Subscription, Task, Theme};
 
@@ -23,7 +23,7 @@ pub enum Message {
     FolderOpened(Result<(), String>),
     CommandDone(Result<Response, String>),
     // 履歴
-    HistoryLoaded(Result<Response, String>, Result<Response, String>),
+    HistoryLoaded(u64, Result<Response, String>, Result<Response, String>),
     SelectSession(String),
     FilesLoaded(String, u32, bool, Result<Response, String>),
     RefreshFiles,
@@ -56,6 +56,12 @@ pub enum Message {
     SaveDone(Result<Response, String>),
     InitTarget,
     PlaySound(NotificationKind),
+    RequestLocalReset,
+    LocalResetPreview(u64, Result<Response, String>),
+    LocalResetText(String),
+    CancelLocalReset,
+    ConfirmLocalReset,
+    LocalResetDone(Result<Response, String>),
 }
 
 pub struct App {
@@ -84,6 +90,11 @@ pub struct App {
     pub password: String,
     pub password_stored: bool,
     pub test_report: Option<NasTestReport>,
+    pub local_reset_summary: Option<LocalDataSummary>,
+    pub local_reset_text: String,
+    pub local_reset_loading: bool,
+    local_reset_generation: u64,
+    history_generation: u64,
 }
 
 impl App {
@@ -113,6 +124,11 @@ impl App {
             password: String::new(),
             password_stored: false,
             test_report: None,
+            local_reset_summary: None,
+            local_reset_text: String::new(),
+            local_reset_loading: false,
+            local_reset_generation: 0,
+            history_generation: 0,
         };
         (
             app,
@@ -155,6 +171,7 @@ impl App {
             }
             Message::Navigate(screen) => {
                 self.pending_nas_action = None;
+                self.clear_reset_confirmation();
                 self.screen = screen;
                 self.toast = None;
                 match screen {
@@ -191,7 +208,10 @@ impl App {
                     return Task::batch([self.load_history(), self.load_files()]);
                 }
             }
-            Message::HistoryLoaded(sessions, events) => {
+            Message::HistoryLoaded(generation, sessions, events) => {
+                if generation != self.history_generation {
+                    return Task::none();
+                }
                 if let Ok(Response::Sessions { sessions }) = sessions {
                     self.sessions = sessions;
                 }
@@ -392,6 +412,65 @@ impl App {
                 }
             }
             Message::PlaySound(kind) => crate::sound::play(kind),
+            Message::RequestLocalReset => {
+                if self.screen != Screen::Settings || self.busy || self.local_reset_loading {
+                    return Task::none();
+                }
+                self.clear_reset_confirmation();
+                self.local_reset_loading = true;
+                let generation = self.local_reset_generation;
+                return Task::perform(ipc::send(Command::GetLocalDataSummary), move |r| {
+                    Message::LocalResetPreview(generation, r)
+                });
+            }
+            Message::LocalResetPreview(generation, result) => {
+                if self.screen != Screen::Settings || generation != self.local_reset_generation {
+                    return Task::none();
+                }
+                self.local_reset_loading = false;
+                match result {
+                    Ok(Response::LocalDataSummary { summary }) => {
+                        self.local_reset_summary = Some(summary)
+                    }
+                    other => self.set_toast(other),
+                }
+            }
+            Message::LocalResetText(text) => self.local_reset_text = text,
+            Message::CancelLocalReset => self.clear_reset_confirmation(),
+            Message::ConfirmLocalReset => {
+                if self.screen != Screen::Settings || self.busy || self.local_reset_text != "削除"
+                {
+                    return Task::none();
+                }
+                let Some(summary) = self.local_reset_summary.take() else {
+                    return Task::none();
+                };
+                self.clear_reset_confirmation();
+                self.busy = true;
+                return Task::perform(
+                    ipc::send(Command::ResetLocalData {
+                        confirmation_token: summary.confirmation_token,
+                    }),
+                    Message::LocalResetDone,
+                );
+            }
+            Message::LocalResetDone(result) => {
+                self.busy = false;
+                if matches!(&result, Ok(Response::Ok { .. })) {
+                    self.history_generation += 1;
+                    self.sessions.clear();
+                    self.events.clear();
+                    self.files.clear();
+                    self.selected_files.clear();
+                    self.selected_session = None;
+                    self.pending_nas_action = None;
+                    self.files_total = 0;
+                    self.files_offset = 0;
+                    self.files_loading = false;
+                    self.test_report = None;
+                }
+                self.set_toast(result);
+            }
             Message::InitTarget => {
                 self.busy = true;
                 return Task::batch([
@@ -412,6 +491,13 @@ impl App {
         } else {
             Some(self.password.clone())
         }
+    }
+
+    fn clear_reset_confirmation(&mut self) {
+        self.local_reset_generation += 1;
+        self.local_reset_summary = None;
+        self.local_reset_text.clear();
+        self.local_reset_loading = false;
     }
 
     fn load_files(&mut self) -> Task<Message> {
@@ -462,6 +548,7 @@ impl App {
     }
 
     fn load_history(&self) -> Task<Message> {
+        let generation = self.history_generation;
         Task::perform(
             async {
                 let s = ipc::send(Command::ListSessions { limit: 200 }).await;
@@ -472,7 +559,7 @@ impl App {
                 .await;
                 (s, e)
             },
-            |(s, e)| Message::HistoryLoaded(s, e),
+            move |(s, e)| Message::HistoryLoaded(generation, s, e),
         )
     }
 
@@ -520,6 +607,69 @@ pub fn file_is_actionable(f: &FileSummary) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_reset_requires_typed_confirmation_and_ignores_late_previews() {
+        let (mut app, _) = App::new();
+        app.screen = Screen::Settings;
+        app.local_reset_summary = Some(LocalDataSummary {
+            confirmation_token: "token".into(),
+            ..Default::default()
+        });
+        let _ = app.update(Message::ConfirmLocalReset);
+        assert!(!app.busy);
+        assert!(app.local_reset_summary.is_some());
+        let _ = app.update(Message::LocalResetText("削除".into()));
+        let generation = app.local_reset_generation;
+        let _ = app.update(Message::Navigate(Screen::Main));
+        let _ = app.update(Message::LocalResetPreview(
+            generation,
+            Ok(Response::LocalDataSummary {
+                summary: LocalDataSummary::default(),
+            }),
+        ));
+        let _ = app.update(Message::ConfirmLocalReset);
+        assert!(app.local_reset_summary.is_none());
+        assert!(!app.busy);
+        app.screen = Screen::Settings;
+        app.local_reset_summary = Some(LocalDataSummary {
+            confirmation_token: "token".into(),
+            ..Default::default()
+        });
+        app.local_reset_text = "削除".into();
+        let _ = app.update(Message::ConfirmLocalReset);
+        assert!(app.busy);
+        assert!(app.local_reset_summary.is_none(), "二重実行できない");
+    }
+
+    #[test]
+    fn successful_full_reset_drops_selections_and_late_history_responses() {
+        let (mut app, _) = App::new();
+        app.selected_session = Some("old".into());
+        app.files = vec![file("old-file", "RETRY_WAIT")];
+        app.selected_files.insert("old-file".into());
+        let old_generation = app.history_generation;
+        let _ = app.update(Message::LocalResetDone(Ok(Response::Ok {
+            message: "削除しました".into(),
+        })));
+        assert!(
+            app.selected_session.is_none() && app.files.is_empty() && app.selected_files.is_empty()
+        );
+        let _ = app.update(Message::HistoryLoaded(
+            old_generation,
+            Err("old".into()),
+            Ok(Response::Events {
+                events: vec![EventSummary {
+                    created_at_utc: "old".into(),
+                    level: "info".into(),
+                    event_type: "old".into(),
+                    message: "old history".into(),
+                    session_id: None,
+                }],
+            }),
+        ));
+        assert!(app.events.is_empty());
+    }
 
     fn file(id: &str, nas_state: &str) -> FileSummary {
         FileSummary {

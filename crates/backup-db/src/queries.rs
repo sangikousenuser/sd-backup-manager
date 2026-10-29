@@ -7,6 +7,68 @@ use backup_core::state::{NasFileState, SessionNasState, SessionState, StageState
 use rusqlite::{OptionalExtension, Row, params};
 use std::str::FromStr;
 
+impl Db {
+    pub fn local_data_counts(&self) -> Result<LocalDataCounts> {
+        Ok(self.conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM sessions), (SELECT COUNT(*) FROM files),
+                    (SELECT COUNT(*) FROM transfers), (SELECT COUNT(*) FROM catalog),
+                    (SELECT COUNT(*) FROM devices), (SELECT COUNT(*) FROM events)",
+            [],
+            |r| {
+                Ok(LocalDataCounts {
+                    sessions: r.get::<_, i64>(0)? as u64,
+                    files: r.get::<_, i64>(1)? as u64,
+                    transfers: r.get::<_, i64>(2)? as u64,
+                    catalog_entries: r.get::<_, i64>(3)? as u64,
+                    devices: r.get::<_, i64>(4)? as u64,
+                    events: r.get::<_, i64>(5)? as u64,
+                })
+            },
+        )?)
+    }
+
+    pub fn local_reset_pending(&self) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM app_meta WHERE key = 'local_reset_pending')",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// 実体の削除前に意図を永続化する。完了まで通常の取り込み・NAS 転送を再開しない。
+    pub fn begin_local_reset(&self) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO app_meta(key, value) VALUES('local_reset_pending', '1')",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// PC コピーの削除完了後にだけ呼ぶ。スキーマとカード番号の通し番号は保持する。
+    /// 番号を再利用すると、NAS 上に残した過去の保存先と衝突し得るため。
+    pub fn finish_local_reset(&mut self) -> Result<()> {
+        if !self.local_reset_pending()? {
+            return Err(DbError::Corrupt("一括削除が開始されていません".into()));
+        }
+        let tx = self.conn.transaction()?;
+        tx.execute_batch(
+            "DELETE FROM events;
+             DELETE FROM transfers;
+             DELETE FROM catalog;
+             DELETE FROM session_directories;
+             DELETE FROM files;
+             DELETE FROM sessions;
+             DELETE FROM device_cards;
+             DELETE FROM partitions;
+             DELETE FROM devices;
+             DELETE FROM cards;
+             DELETE FROM app_meta WHERE key <> 'schema_version';",
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+}
+
 fn parse<T: FromStr>(s: String, what: &str) -> rusqlite::Result<T> {
     T::from_str(&s).map_err(|_| {
         rusqlite::Error::FromSqlConversionFailure(

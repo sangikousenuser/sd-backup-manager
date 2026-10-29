@@ -12,6 +12,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub fn recover(shared: &Shared) -> anyhow::Result<()> {
+    if shared.db().local_reset_pending()? {
+        shared
+            .local_reset_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        shared
+            .paused
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Err(e) = crate::reset::finish(shared) {
+            shared.warn(format!(
+                "一括削除は未完了です。設定から再実行してください: {e}"
+            ));
+        }
+        return Ok(());
+    }
     let report = shared.db().recover_after_restart()?;
     for s in shared.db().sessions_in_states(SessionState::ALL)? {
         shared

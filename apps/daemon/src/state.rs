@@ -51,6 +51,11 @@ pub struct Shared {
     pub snapshot_tx: watch::Sender<Arc<Snapshot>>,
     pub overrides: Overrides,
     pub paused: AtomicBool,
+    /// 一括削除と IPC 操作を直列化する。
+    pub maintenance: tokio::sync::RwLock<()>,
+    /// 削除途中で失敗した場合も通常処理を再開させない（DB の意図と対応）。
+    pub local_reset_pending: AtomicBool,
+    pub local_reset_confirmation: Mutex<Option<(String, Instant)>>,
 }
 
 impl Shared {
@@ -84,6 +89,9 @@ impl Shared {
             snapshot_tx,
             overrides,
             paused: AtomicBool::new(false),
+            maintenance: tokio::sync::RwLock::new(()),
+            local_reset_pending: AtomicBool::new(false),
+            local_reset_confirmation: Mutex::new(None),
         })
     }
 
@@ -104,7 +112,7 @@ impl Shared {
     }
 
     pub fn is_paused(&self) -> bool {
-        self.paused.load(Ordering::SeqCst)
+        self.paused.load(Ordering::SeqCst) || self.local_reset_pending.load(Ordering::SeqCst)
     }
 
     /// 履歴（events）とトレースログの両方に記録する。
