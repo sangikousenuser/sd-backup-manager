@@ -67,7 +67,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .push(text_input("/mnt/nas/FestivalBackup", &s.nas_mounted_path).on_input(Message::NasMountedPath))
                 .push(text("ローカルディスクへの誤書き込みを防ぐため、NAS としてマウントされていない場合は転送しません。").size(12).color(theme::GRAY));
         }
-        Mode::Disabled => {}
+        Mode::Disabled => {
+            nas = nas.push(
+                text("NAS に転送するには接続方法を選んで保存してください。未設定の間は PC 内にデータを保持します。")
+                    .size(12),
+            );
+        }
     }
     nas = nas.push(
         checkbox(s.final_rehash_before_cleanup)

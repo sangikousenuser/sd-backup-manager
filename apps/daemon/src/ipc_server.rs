@@ -616,7 +616,10 @@ async fn update_settings(
     apply_view(&mut cfg, &view)?;
     let destination_changed = !old.nas.same_destination(&cfg.nas);
     if destination_changed {
-        if nas_work_in_progress(shared) {
+        // NAS 未設定の間に SSD へ取り込んだファイルにも、最初の保存先を設定できる。
+        // 一度設定した接続先の変更は、従来どおり未完了の転送がある間は禁止する。
+        let first_destination = old.nas.mode == NasMode::Disabled && old.nas.target_id.is_empty();
+        if !first_destination && nas_work_in_progress(shared) {
             return Err(
                 "未完了の NAS 転送があるため、接続先は変更できません（完了後に変更してください）"
                     .into(),

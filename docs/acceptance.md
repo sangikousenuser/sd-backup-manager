@@ -58,6 +58,12 @@ E2E と読み込み不可ファイルの E2E は Windows では模擬できな�
 加えて、Windows では **メディア検出・ロック/ディスマウント・抜去検出・SMB 接続・タスク スケジューラ・
 インストーラのすべてが実機未検証**。確認項目は [HANDOFF.md](HANDOFF.md) の 5 章。
 
+## v0.4.1 の追加確認（2026-10-29、シミュレータ）
+
+- `first_nas_setup_preserves_pending_copies_and_transfers_after_restart`: NAS 未設定で SD を取り込み、PC コピーとキューを保持したまま IPC で最初の保存先を設定。設定後の別接続先・無効化への変更は拒否し、同じ接続先の認証ユーザー変更は許可する。
+- 再起動後、ローカルディレクトリの模擬 NAS を初期化し、元のキューの全ファイルがバイト一致で転送され、検証完了後にだけ PC のコピーが削除されることを確認。
+- macOS の workspace テスト・clippy と Windows GNU ターゲットの型チェックを実施。Windows 実機・実際の SMB 接続・GUI 操作の受け入れ試験は未実施。
+
 ## 実機試験の手順（Ubuntu 26.04）
 
 1. `bash install.sh --version <tag>` → `sd-backup doctor` が全て ✔。

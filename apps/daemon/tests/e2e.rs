@@ -865,6 +865,128 @@ async fn nas_file_command(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn first_nas_setup_preserves_pending_copies_and_transfers_after_restart() {
+    use backup_ipc::{Command, Response};
+    let e = env();
+    let token = CancellationToken::new();
+    let shared = start(options(&e, Overrides::default()), token.clone())
+        .await
+        .unwrap();
+    make_card(&e.media, "before-nas-setup");
+    wait_until(
+        "SSD backup before NAS setup",
+        Duration::from_secs(20),
+        || slot_phase(&shared, 0) == Some(SlotPhase::DoneGreen),
+    )
+    .await;
+    let sid = session_of_slot(&shared, 0).unwrap();
+    let files = shared.db().files_for_session(&sid).unwrap();
+    let staged = files
+        .iter()
+        .map(|f| {
+            let p = shared
+                .staging
+                .final_path(&sid, &f.destination_rel_path)
+                .unwrap();
+            let bytes = fs::read(&p).unwrap();
+            (p, bytes)
+        })
+        .collect::<Vec<_>>();
+    let socket = AppPaths::under(&e.base).socket_path();
+    let request = |command| backup_ipc::one_shot(&socket, "initial-nas-test", command);
+    // 保存先の設定テスト中に、実在しない SMB ホストへの接続を試みない。
+    request(Command::Pause).await.unwrap();
+    let Response::Settings { mut settings, .. } = request(Command::GetSettings).await.unwrap()
+    else {
+        panic!("settings response expected");
+    };
+    assert_eq!(settings.nas_mode, "disabled");
+    settings.nas_mode = "gvfs".into();
+    settings.nas_url = "smb://initial-nas.invalid/backup/".into();
+    request(Command::UpdateSettings {
+        settings: settings.clone(),
+        password: None,
+    })
+    .await
+    .expect("initial NAS setup must be allowed with queued files");
+    assert_eq!(
+        shared.db().nas_queue_stats().unwrap().queued_files,
+        files.len() as u64
+    );
+    for (p, bytes) in &staged {
+        assert_eq!(&fs::read(p).unwrap(), bytes);
+    }
+    let saved = backup_config::Config::load(&AppPaths::under(&e.base).config_file()).unwrap();
+    assert_eq!(saved.nas.url, settings.nas_url);
+    // 最初の設定を済ませた後は、未初期化でも転送先の変更・無効化は禁止する。
+    let mut changed = settings.clone();
+    changed.nas_url = "smb://other-nas.invalid/backup/".into();
+    let error = request(Command::UpdateSettings {
+        settings: changed,
+        password: None,
+    })
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("未完了の NAS 転送"), "{error}");
+    let mut disabled = settings.clone();
+    disabled.nas_mode = "disabled".into();
+    assert!(
+        request(Command::UpdateSettings {
+            settings: disabled,
+            password: None
+        })
+        .await
+        .is_err()
+    );
+    // 同じ接続先のユーザー名などは、キューを消さずに修正できる。
+    settings.nas_username = "camera-backup".into();
+    request(Command::UpdateSettings {
+        settings,
+        password: None,
+    })
+    .await
+    .unwrap();
+    remove_retry(e.media.join("before-nas-setup")).unwrap();
+    shutdown(shared, token).await;
+
+    // 再起動後に接続先を初期化し、元の転送キューが最後まで処理される。
+    let nas = e.base.join("new-nas");
+    let token = CancellationToken::new();
+    let shared = start(
+        options(
+            &e,
+            Overrides {
+                nas_local_dir: Some(nas.clone()),
+                ..Default::default()
+            },
+        ),
+        token.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        shared.db().nas_queue_stats().unwrap().queued_files,
+        files.len() as u64
+    );
+    fs::create_dir(&nas).unwrap();
+    request(Command::InitializeNasTarget).await.unwrap();
+    assert!(!shared.config().nas.target_id.is_empty());
+    wait_until(
+        "NAS completed after first setup",
+        Duration::from_secs(30),
+        || session_state(&shared, &sid) == SessionState::Complete,
+    )
+    .await;
+    let session = shared.db().get_session(&sid).unwrap().unwrap();
+    for (f, (_, bytes)) in files.iter().zip(&staged) {
+        let p = nas.join(&session.folder_name).join(&f.destination_rel_path);
+        assert_eq!(&fs::read(p).unwrap(), bytes);
+    }
+    assert!(session.staging_deleted_at_utc.is_some());
+    shutdown(shared, token).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn selected_nas_files_can_cancel_keep_pc_restart_and_resume_without_blocking_other_files() {
     use backup_core::state::NasFileState;
     use backup_ipc::NasFileAction;
