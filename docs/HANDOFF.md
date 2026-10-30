@@ -9,7 +9,7 @@ Windows での読み替えは [windows.md](windows.md)）。
 
 ## 1. 現在の状態
 
-未リリース（2026-10-31）: NAS 転送が止まらないように修正。NAS の読み書きを無応答検知付き（`watchdog.rs`）で行い、
+v0.4.3（2026-10-31）: NAS 転送が止まらないように修正。NAS の読み書きを無応答検知付き（`watchdog.rs`）で行い、
 進捗が止まった処理は切り離して再送する。「今すぐ再試行」・ユーザー操作は数秒で効く。転送キューは毎回自己修復し、
 0 件なのに完了しない理由を画面に表示する。E2E で無応答の模擬（`Overrides::nas_hang_once`）から完了・再試行・
 ユーザー操作・「転送中」の残骸の修復を確認。実 SMB の切断（Windows 実機）は未検証。
@@ -42,8 +42,8 @@ GUI に PC 内の保存先表示・開くボタンを追加。シミュレータ
 
 | 項目 | 状態 |
 |---|---|
-| Linux（Ubuntu 26.04）版 | v0.4.2 を配布（.deb / tar.gz / install.sh）。実機にインストールしてデーモン起動と `doctor` を確認したのは v0.1.0。SD カード・NAS での実機受け入れ試験は未実施 |
-| Windows 版 | v0.4.2 を正式 Release で配布（Setup.exe・zip）。GitHub Actions の windows-latest で clippy・単体テスト・E2E（シミュレータ）・Setup.exe 作成まで確認。**Windows 実機での動作確認は未実施** |
+| Linux（Ubuntu 26.04）版 | v0.4.3 を配布（.deb / tar.gz / install.sh）。実機にインストールしてデーモン起動と `doctor` を確認したのは v0.1.0。SD カード・NAS での実機受け入れ試験は未実施 |
+| Windows 版 | v0.4.3 を正式 Release で配布（Setup.exe・zip）。GitHub Actions の windows-latest で clippy・単体テスト・E2E（シミュレータ）・Setup.exe 作成まで確認。**Windows 実機での動作確認は未実施** |
 | macOS | 開発用。シミュレータでのみ動作（実機メディアは扱わない） |
 | CI | `.github/workflows/ci.yml`: fmt / clippy + test（Linux・macOS・Windows）/ cargo audit / Ubuntu 26.04 コンテナでのリリースビルド / Windows リリースビルド（zip + Setup.exe） |
 | リリース | `v*` タグの push で `.github/workflows/release.yml` が Linux（.deb, tar.gz）と Windows（Setup.exe, zip）を GitHub Releases に公開 |
@@ -222,4 +222,4 @@ CI（windows-latest）で確認できるのは、コンパイル・clippy・単�
 | 2026-10-28 | v0.3.0 リリース（SD 全体の保存・カード別フォルダ、PC 内保存先を開くボタン） |
 | 2026-10-29 | v0.4.0 を正式 Release で配布（NAS 転送のファイル別再試行・中止・PC コピーと転送キューの削除）。CI 成果物のみの配布から、通常の最新版ダウンロードを更新 |
 | 2026-10-29 | v0.4.1 の NAS 初回設定修正、v0.4.2 の設定からの PC 内データ一括削除を正式公開。全 OS の CI・Windows インストーラー作成が成功。macOS で一括削除の確認画面・入力・キャンセルを目視確認 |
-| 2026-10-31 | NAS 転送のウォッチドッグ・キューの自己修復・再試行の強化（未リリース）。無応答で 0 件のまま止まる問題を修正 |
+| 2026-10-31 | v0.4.3: NAS 転送のウォッチドッグ・キューの自己修復・再試行の強化。無応答で 0 件のまま止まる問題を修正 |
