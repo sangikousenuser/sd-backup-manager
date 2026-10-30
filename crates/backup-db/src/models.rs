@@ -166,6 +166,44 @@ pub struct NasQueueStats {
     pub last_error: Option<String>,
 }
 
+/// 転送キューの自己修復の結果（`Db::repair_nas_queue`）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NasRepairReport {
+    /// 実行中の転送がないのに「転送中」のまま残っていたもの
+    pub stale_uploads: usize,
+    /// SSD で確定済みなのに転送レコードがなかったもの
+    pub missing_transfers: usize,
+    /// 転送は完了扱いなのに NAS 検証の記録がなかったもの
+    pub done_unverified: usize,
+    /// ファイルと転送の状態の食い違いを直したもの
+    pub state_mismatches: usize,
+    /// 未取り込みのファイルが残っていて NAS 完了できないため「要対応」にしたセッション
+    pub sessions_needing_attention: usize,
+}
+
+impl NasRepairReport {
+    pub fn total(&self) -> usize {
+        self.stale_uploads
+            + self.missing_transfers
+            + self.done_unverified
+            + self.state_mismatches
+            + self.sessions_needing_attention
+    }
+}
+
+/// 転送キューが空なのに完了していない理由の集計（画面表示用）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NasBlockedSummary {
+    /// 転送はすべて終わり、完了処理（マニフェスト・最終確認・SSD 削除）待ちのセッション
+    pub ready_sessions: u64,
+    /// ユーザーが中止したまま保持しているファイル
+    pub cancelled_files: u64,
+    /// 「要対応」のセッション
+    pub attention_sessions: u64,
+    /// 要対応セッション内の、SSD に取り込めていないファイル
+    pub not_copied_files: u64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RecoveryReport {
     pub sessions_interrupted: Vec<String>,

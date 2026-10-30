@@ -14,7 +14,7 @@ use backup_storage::capacity::FsSpace;
 use backup_storage::local::Staging;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{Notify, watch};
@@ -27,6 +27,10 @@ pub struct Overrides {
     pub nas_local_dir: Option<PathBuf>,
     /// 空き容量の代わりに使う値（容量制御のテスト用）。
     pub fake_ssd_free_bytes: Option<u64>,
+    /// NAS 処理の無応答とみなすまでの時間（テスト用。既定は設定の `transfer.stall_timeout_secs`）。
+    pub nas_stall_timeout: Option<std::time::Duration>,
+    /// テスト用: 格納パスにこの文字列を含むファイルの初回転送を「応答なし」で固める（SMB 切断の模擬）。
+    pub nas_hang_once: Option<String>,
 }
 
 pub struct Shared {
@@ -45,6 +49,14 @@ pub struct Shared {
     pub media_session_operation: tokio::sync::Mutex<()>,
     /// 操作待ちのファイルはチャンク境界で転送を中断する。
     pub nas_cancel_files: Mutex<HashMap<String, usize>>,
+    /// `nas_operation` を待っているユーザー操作の数。転送・完了処理は区切りで譲る。
+    pub nas_op_waiters: AtomicUsize,
+    /// 「今すぐ再試行」の回数。増えたら応答のない NAS 処理を切り離してやり直す。
+    pub nas_retry_epoch: AtomicU64,
+    /// 応答がなく切り離した NAS 処理（OS 側で戻るのを待っているスレッド）の数。
+    pub nas_hung_ops: Arc<AtomicUsize>,
+    /// テスト用フック（`Overrides::nas_hang_once`）を一度だけ発動させる。
+    pub nas_hang_fired: AtomicBool,
     /// 容量待ちのメディアを起こす（SSD 削除で空きが増えた等）。
     pub capacity_wakeup: Notify,
     pub shutdown: CancellationToken,
@@ -84,6 +96,10 @@ impl Shared {
             nas_operation: tokio::sync::Mutex::new(()),
             media_session_operation: tokio::sync::Mutex::new(()),
             nas_cancel_files: Mutex::default(),
+            nas_op_waiters: AtomicUsize::new(0),
+            nas_retry_epoch: AtomicU64::new(0),
+            nas_hung_ops: Arc::new(AtomicUsize::new(0)),
+            nas_hang_fired: AtomicBool::new(false),
             capacity_wakeup: Notify::new(),
             shutdown,
             snapshot_tx,
@@ -92,6 +108,32 @@ impl Shared {
             maintenance: tokio::sync::RwLock::new(()),
             local_reset_pending: AtomicBool::new(false),
             local_reset_confirmation: Mutex::new(None),
+        })
+    }
+
+    /// NAS 処理との排他を取る。待っている間は転送・完了処理に区切りで譲ってもらい、
+    /// 応答のない NAS 処理は切り離される（`watchdog`）ため、通常は数秒で取得できる。
+    pub async fn lock_nas_operation(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        self.nas_op_waiters.fetch_add(1, Ordering::SeqCst);
+        self.nas_wakeup.notify_one();
+        let guard = tokio::time::timeout(timeout, self.nas_operation.lock())
+            .await
+            .ok();
+        self.nas_op_waiters.fetch_sub(1, Ordering::SeqCst);
+        guard
+    }
+
+    pub fn nas_op_waiting(&self) -> bool {
+        self.nas_op_waiters.load(Ordering::SeqCst) > 0
+    }
+
+    /// NAS 処理を無応答とみなすまでの時間。
+    pub fn nas_stall_timeout(&self) -> std::time::Duration {
+        self.overrides.nas_stall_timeout.unwrap_or_else(|| {
+            std::time::Duration::from_secs(self.config().transfer.stall_timeout_secs.max(10))
         })
     }
 
@@ -229,6 +271,10 @@ pub struct NasRuntime {
     pub next_retry_utc: Option<String>,
     pub last_error: Option<String>,
     pub needs_attention: bool,
+    /// 転送以外の処理内容（最終確認・マニフェスト保存・SSD 削除など）。
+    pub phase_detail: Option<String>,
+    /// 現在の NAS 処理が進捗していない秒数（10 秒以上のとき）。
+    pub stalled_secs: Option<u64>,
 }
 
 pub struct Runtime {

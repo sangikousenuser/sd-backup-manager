@@ -30,11 +30,11 @@ PC 保持、再起動後の中止状態、明示的な再試行を検証。
 | AT-12 | 同一パスを上書き | E2E | `nas_offline_*`: 同サイズで内容を変えた README.TXT を再取り込み |
 | AT-13 | 破損ファイルで 3 回失敗 | E2E | `unreadable_file_*`: 合計 3 試行、他は継続、黄色・取り外し可能、SSD 削除なし |
 | AT-14 | 外部アプリがマウント保持 | E2E（模擬）／実機未検証 | `unmount_failure_*`: 取り外し可能を表示しない・再試行で回復 |
-| AT-15 | コピー中に NAS 切断 | E2E（NAS 不在）／実機未検証 | `nas_offline_*`: SSD 保持・NAS 復帰後に転送完了。実 SMB の切断試験が必要 |
+| AT-15 | コピー中に NAS 切断 | E2E（NAS 不在・無応答の模擬）／実機未検証 | `nas_offline_*`: SSD 保持・NAS 復帰後に転送完了。`unresponsive_nas_*`・`retry_and_user_actions_*`: 転送中に応答が止まっても切り離して再送し完了、無応答中も再試行・ユーザー操作が数秒で効く。実 SMB の切断試験が必要 |
 | AT-16 | NAS 容量不足 | 実装済み・未試験 | ENOSPC/EDQUOT と事前の空き確認で再試行待ち。実 NAS で要確認 |
 | AT-17 | SSD 20GB 境界 | E2E + 単体 | `capacity_wait_*`・`policy::admission_respects_reserve` |
 | AT-18 | 128GB × 2 満杯 | 単体 | アドミッションで 2 枚目は容量待ち（先着優先）。実機で要確認 |
-| AT-19 | NAS 一時ファイル作成中の切断 | 単体 | 中断時に一時ファイル削除・最終名を作らない。再送は先頭から |
+| AT-19 | NAS 一時ファイル作成中の切断 | 単体 + E2E | 中断時に一時ファイル削除・最終名を作らない。再送は先頭から。`stale_upload_records_*`: 「転送中」のまま残った記録を自己修復して完了 |
 | AT-20 | NAS 側の改変 | 単体 + 実装 | `nas::tampered_*`。削除前の最終再ハッシュで不一致なら再転送・SSD 保持 |
 | AT-21 | NAS 全転送検証成功 | E2E | `happy_path_*`: そのセッションの SSD データだけ削除、DB・カタログ保持 |
 | AT-22 | kill -9 / 停電 | 単体 + E2E（再起動） | `db::recovery_resets_in_flight_work`、`.part` 破棄、`nas_offline_*` の再起動。実機で kill -9 / 電源断試験が必要 |

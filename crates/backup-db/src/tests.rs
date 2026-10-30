@@ -555,3 +555,140 @@ fn local_file_deletion_removes_queue_before_unlink_and_never_requeues_deleted_fi
         .unwrap();
     assert_eq!(pending[0].stage_state, StageState::DeletePending);
 }
+
+#[test]
+fn queue_repair_requeues_lost_and_stale_work_but_never_marks_success() {
+    let (db, _, partition, session) = setup();
+    let sid = session.session_id.clone();
+    let names = ["LOST.JPG", "STALE.JPG", "DONE.JPG", "CANCEL.JPG", "OK.JPG"];
+    let files: Vec<FileRow> = names
+        .iter()
+        .map(|n| db.insert_file(&new_file(&sid, &partition, n)).unwrap())
+        .collect();
+    for f in &files {
+        db.mark_file_ssd_verified(&f.file_id, &"a".repeat(64))
+            .unwrap();
+    }
+    ready_for_nas(&db, &sid);
+    let (lost, stale, done, cancel, ok) = (&files[0], &files[1], &files[2], &files[3], &files[4]);
+    // 転送レコードが消えた
+    db.conn
+        .execute("DELETE FROM transfers WHERE file_id = ?1", [&lost.file_id])
+        .unwrap();
+    // 転送中のまま止まった（ワーカーが戻ってこなかった）
+    let job = loop {
+        let j = db.next_due_transfer(&now_utc()).unwrap().unwrap();
+        if j.file_id == stale.file_id {
+            break j;
+        }
+        db.transfer_retry(
+            &j,
+            "x",
+            &to_db_time(chrono::Utc::now() + chrono::Duration::hours(1)),
+        )
+        .unwrap();
+    };
+    db.transfer_started(&job, ".tmp").unwrap();
+    // 転送完了扱いなのにファイル側が未検証
+    db.conn
+        .execute(
+            "UPDATE transfers SET state = 'DONE' WHERE file_id = ?1",
+            [&done.file_id],
+        )
+        .unwrap();
+    // ユーザーが中止した
+    db.manage_nas_files(&sid, std::slice::from_ref(&cancel.file_id), false)
+        .unwrap();
+    // 正常に検証済み
+    let okjob = TransferJob {
+        transfer_id: db
+            .conn
+            .query_row(
+                "SELECT transfer_id FROM transfers WHERE file_id = ?1",
+                [&ok.file_id],
+                |r| r.get(0),
+            )
+            .unwrap(),
+        file_id: ok.file_id.clone(),
+        session_id: sid.clone(),
+        folder_name: session.folder_name.clone(),
+        destination_rel_path: ok.destination_rel_path.clone(),
+        blake3_hash: "a".repeat(64),
+        size_bytes: 10,
+        attempts: 0,
+    };
+    db.transfer_verified(&okjob, "smb://nas/share").unwrap();
+
+    let r = db.repair_nas_queue().unwrap();
+    assert_eq!(r.stale_uploads, 1);
+    assert_eq!(r.missing_transfers, 1);
+    assert_eq!(r.done_unverified, 1);
+    assert_eq!(r.sessions_needing_attention, 0);
+    for f in [lost, stale, done] {
+        let row = db.get_file(&f.file_id).unwrap().unwrap();
+        assert!(
+            matches!(
+                row.nas_state,
+                NasFileState::Queued | NasFileState::RetryWait
+            ),
+            "{:?}",
+            row.nas_state
+        );
+    }
+    // ユーザーの中止と検証済みには触れない
+    assert_eq!(
+        db.get_file(&cancel.file_id).unwrap().unwrap().nas_state,
+        NasFileState::Cancelled
+    );
+    assert_eq!(
+        db.get_file(&ok.file_id).unwrap().unwrap().nas_state,
+        NasFileState::NasVerified
+    );
+    assert_eq!(
+        db.pending_transfer_count(&sid).unwrap(),
+        4,
+        "lost, stale, done, cancelled"
+    );
+    // 二回目は何も直さない（冪等）
+    assert_eq!(db.repair_nas_queue().unwrap().total(), 0);
+
+    let summary = db.nas_blocked_summary().unwrap();
+    assert_eq!(summary.cancelled_files, 1);
+    assert_eq!(summary.ready_sessions, 0);
+}
+
+#[test]
+fn queue_repair_flags_nas_pending_sessions_that_can_never_finish() {
+    let (db, _, partition, session) = setup();
+    let sid = session.session_id.clone();
+    let copied = db
+        .insert_file(&new_file(&sid, &partition, "A.JPG"))
+        .unwrap();
+    db.insert_file(&new_file(&sid, &partition, "NOT_COPIED.JPG"))
+        .unwrap();
+    db.mark_file_ssd_verified(&copied.file_id, &"a".repeat(64))
+        .unwrap();
+    ready_for_nas(&db, &sid);
+    let r = db.repair_nas_queue().unwrap();
+    assert_eq!(r.sessions_needing_attention, 1);
+    let s = db.get_session(&sid).unwrap().unwrap();
+    assert_eq!(s.state, SessionState::NeedsAttention);
+    assert!(s.last_error.unwrap().contains("再接続"));
+    let summary = db.nas_blocked_summary().unwrap();
+    assert_eq!(summary.attention_sessions, 1);
+    assert_eq!(summary.not_copied_files, 1);
+}
+
+#[test]
+fn queue_repair_ignores_finished_and_discarded_sessions() {
+    let (db, _, partition, session) = setup();
+    let sid = session.session_id.clone();
+    let f = db
+        .insert_file(&new_file(&sid, &partition, "A.JPG"))
+        .unwrap();
+    db.mark_file_ssd_verified(&f.file_id, &"a".repeat(64))
+        .unwrap();
+    db.conn.execute("DELETE FROM transfers", []).unwrap();
+    db.mark_staging_deleted(&sid).unwrap();
+    assert_eq!(db.repair_nas_queue().unwrap().total(), 0);
+}

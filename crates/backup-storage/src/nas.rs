@@ -322,9 +322,8 @@ impl NasRoot {
             Err(e) if e.kind() == io::ErrorKind::NotFound => false,
             Err(e) => return Err(NasError::from_io(e)),
         };
-        if existed
-            && self.verify_existing(folder, dest_rel, expected_hash, &mut crate::no_progress())?
-        {
+        // 既存実体の照合・読み戻しの間も progress(0) を呼び、呼び出し側の無応答検知と中断に応じる
+        if existed && self.verify_existing(folder, dest_rel, expected_hash, &mut |_| progress(0))? {
             return Ok(UploadOutcome::AlreadyPresent);
         }
 
@@ -372,7 +371,13 @@ impl NasRoot {
                 });
             }
             // 読み戻し
-            let back = hash_file(&temp, &mut crate::no_progress()).map_err(NasError::from_io)?;
+            let back = hash_file(&temp, &mut |_| progress(0)).map_err(|e| {
+                if e.kind() == io::ErrorKind::Interrupted {
+                    NasError::Aborted
+                } else {
+                    NasError::from_io(e)
+                }
+            })?;
             if back.hash != expected_hash {
                 return Err(NasError::Mismatch);
             }

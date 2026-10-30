@@ -48,7 +48,7 @@ fn main() -> anyhow::Result<()> {
             simulate_media: args.simulate_media,
             overrides: Overrides {
                 nas_local_dir: args.dev_nas_dir,
-                fake_ssd_free_bytes: None,
+                ..Default::default()
             },
             watch: None,
         };

@@ -1198,6 +1198,92 @@ impl Db {
         Ok(())
     }
 
+    /// 転送キューの自己修復。NAS ワーカーが転送を実行していない時点で呼ぶこと
+    /// （その時点の「転送中」はすべて中断の残りとみなす）。
+    /// 何件直しても安全側（再送・要対応）に倒すだけで、成功扱いにはしない。
+    pub fn repair_nas_queue(&self) -> Result<NasRepairReport> {
+        let tx = self.conn.unchecked_transaction()?;
+        let now = now_utc();
+        let mut r = NasRepairReport {
+            stale_uploads: tx.execute(
+                "UPDATE transfers SET state = 'QUEUED', nas_temp_rel_path = NULL, updated_at_utc = ?1
+                 WHERE state = 'UPLOADING'",
+                [&now],
+            )?,
+            ..Default::default()
+        };
+        // 対象: SSD に確定済み・ハッシュあり・NAS 未検証・ユーザーが中止/削除していない、
+        // かつ SSD のデータが残っている進行中のセッション
+        const LIVE_FILE: &str = "f.stage_state = 'SSD_VERIFIED' AND f.blake3_hash IS NOT NULL
+              AND f.nas_state NOT IN ('NAS_VERIFIED','CANCELLED','DELETE_PENDING','DELETED')
+              AND f.session_id IN (SELECT session_id FROM sessions
+                  WHERE staging_deleted_at_utc IS NULL AND state NOT IN ('COMPLETE','DISCARDED'))";
+        r.missing_transfers = tx.execute(
+            &format!(
+                "INSERT INTO transfers(transfer_id, file_id, session_id, state, attempts, last_error,
+                    created_at_utc, updated_at_utc)
+                 SELECT lower(hex(randomblob(16))), f.file_id, f.session_id, 'QUEUED', 0,
+                    '転送レコードがなかったため再登録しました', ?1, ?1
+                 FROM files f
+                 WHERE {LIVE_FILE} AND NOT EXISTS (SELECT 1 FROM transfers t WHERE t.file_id = f.file_id)"
+            ),
+            [&now],
+        )?;
+        r.done_unverified = tx.execute(
+            &format!(
+                "UPDATE transfers SET state = 'QUEUED', next_attempt_utc = NULL,
+                    last_error = 'NAS 検証の記録がないため再送します', updated_at_utc = ?1
+                 WHERE state = 'DONE' AND file_id IN (SELECT f.file_id FROM files f WHERE {LIVE_FILE})"
+            ),
+            [&now],
+        )?;
+        r.state_mismatches = tx.execute(
+            "UPDATE files SET nas_state = (SELECT t.state FROM transfers t WHERE t.file_id = files.file_id)
+             WHERE stage_state = 'SSD_VERIFIED'
+               AND nas_state NOT IN ('CANCELLED','DELETE_PENDING','DELETED')
+               AND EXISTS (SELECT 1 FROM transfers t WHERE t.file_id = files.file_id
+                           AND t.state IN ('QUEUED','RETRY_WAIT') AND t.state != files.nas_state)",
+            [],
+        )?;
+        r.sessions_needing_attention = tx.execute(
+            "UPDATE sessions SET state = 'NEEDS_ATTENTION',
+                last_error = 'SSD に取り込めていないファイルがあります（同じ SD を再接続すると続きから取り込みます）',
+                updated_at_utc = ?1
+             WHERE state = 'NAS_PENDING' AND EXISTS (
+                SELECT 1 FROM files f WHERE f.session_id = sessions.session_id
+                  AND f.stage_state IN ('DISCOVERED','COPYING','VERIFYING','FAILED_RETRYABLE',
+                                        'FAILED_TERMINAL','SOURCE_REMOVED'))",
+            [&now],
+        )?;
+        tx.commit()?;
+        Ok(r)
+    }
+
+    /// 転送キューが空なのに完了しない理由の集計。
+    pub fn nas_blocked_summary(&self) -> Result<NasBlockedSummary> {
+        let (ready, cancelled, attention, not_copied): (i64, i64, i64, i64) = self.conn.query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM sessions s WHERE s.state IN ('NAS_PENDING','NAS_VERIFIED','STAGING_CLEANUP')
+                    AND NOT EXISTS (SELECT 1 FROM transfers t WHERE t.session_id = s.session_id AND t.state != 'DONE')),
+                (SELECT COUNT(*) FROM files f JOIN sessions s ON s.session_id = f.session_id
+                    WHERE f.nas_state = 'CANCELLED' AND s.staging_deleted_at_utc IS NULL
+                      AND s.state NOT IN ('COMPLETE','DISCARDED')),
+                (SELECT COUNT(*) FROM sessions WHERE state = 'NEEDS_ATTENTION' AND staging_deleted_at_utc IS NULL),
+                (SELECT COUNT(*) FROM files f JOIN sessions s ON s.session_id = f.session_id
+                    WHERE s.state = 'NEEDS_ATTENTION' AND s.staging_deleted_at_utc IS NULL
+                      AND f.stage_state IN ('DISCOVERED','COPYING','VERIFYING','FAILED_RETRYABLE',
+                                            'FAILED_TERMINAL','SOURCE_REMOVED'))",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        Ok(NasBlockedSummary {
+            ready_sessions: ready as u64,
+            cancelled_files: cancelled as u64,
+            attention_sessions: attention as u64,
+            not_copied_files: not_copied as u64,
+        })
+    }
+
     /// 「今すぐ再試行」。
     pub fn retry_all_transfers_now(&self) -> Result<usize> {
         let tx = self.conn.unchecked_transaction()?;

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 pub fn build(shared: &Shared) -> Snapshot {
     let cfg = shared.config();
     let stats = shared.db().nas_queue_stats().unwrap_or_default();
+    let blocked = shared.db().nas_blocked_summary().unwrap_or_default();
     let sessions_pending = shared
         .db()
         .sessions_in_states(&[
@@ -93,8 +94,38 @@ pub fn build(shared: &Shared) -> Snapshot {
         .collect();
     let configured = cfg.nas.mode != backup_config::NasMode::Disabled
         || shared.overrides.nas_local_dir.is_some();
+    // 転送待ちが 0 件なのに終わっていない理由を、利用者が次に何をすればよいか分かる形で示す
+    let waiting_reason = if stats.queued_files == 0 && rt.nas.phase_detail.is_none() {
+        let mut parts = Vec::new();
+        if blocked.ready_sessions > 0 {
+            parts.push(if rt.nas.connected {
+                format!(
+                    "転送は完了。{} セッションの完了処理（最終確認・SSD 削除）を順に行います",
+                    blocked.ready_sessions
+                )
+            } else {
+                format!(
+                    "転送は完了。NAS に接続でき次第、{} セッションの完了処理を行います",
+                    blocked.ready_sessions
+                )
+            });
+        }
+        if blocked.attention_sessions > 0 {
+            parts.push(format!(
+                "要対応 {} セッション（SD 未取り込み {} 件。同じ SD を再接続すると続きから取り込みます）",
+                blocked.attention_sessions, blocked.not_copied_files
+            ));
+        }
+        (!parts.is_empty()).then(|| parts.join(" ／ "))
+    } else {
+        None
+    };
     let nas = NasView {
         cancelled_files: stats.cancelled_files,
+        phase_detail: rt.nas.phase_detail.clone(),
+        stalled_secs: rt.nas.stalled_secs,
+        hung_operations: crate::watchdog::hung_operations(shared) as u64,
+        waiting_reason,
         configured,
         connected: rt.nas.connected,
         target: match &shared.overrides.nas_local_dir {

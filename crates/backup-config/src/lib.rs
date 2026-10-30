@@ -297,6 +297,8 @@ impl Default for UiConfig {
 pub struct TransferConfig {
     pub backoff_base_secs: u64,
     pub backoff_max_secs: u64,
+    /// NAS への読み書きがこの秒数まったく進まなければ無応答とみなし、処理を切り離して再試行する。
+    pub stall_timeout_secs: u64,
 }
 
 impl Default for TransferConfig {
@@ -304,6 +306,7 @@ impl Default for TransferConfig {
         Self {
             backoff_base_secs: 5,
             backoff_max_secs: 300,
+            stall_timeout_secs: 120,
         }
     }
 }
@@ -379,6 +382,9 @@ impl Config {
         }
         if self.transfer.backoff_base_secs == 0 {
             self.transfer.backoff_base_secs = 5;
+        }
+        if self.transfer.stall_timeout_secs < 10 {
+            self.transfer.stall_timeout_secs = 120;
         }
         if self.transfer.backoff_max_secs < self.transfer.backoff_base_secs {
             self.transfer.backoff_max_secs = self.transfer.backoff_base_secs;

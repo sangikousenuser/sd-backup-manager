@@ -380,8 +380,11 @@ async fn manage_nas_files(
     }
     // 意図を先に登録し、転送中ならチャンク境界で安全に停止させる。
     let _intents = NasFileIntents::new(shared, ids.clone());
-    let _operation = tokio::time::timeout(std::time::Duration::from_secs(10), shared.nas_operation.lock()).await
-        .map_err(|_| "転送の停止待ちがタイムアウトしました。NAS の応答を確認して再実行してください（操作は確定していません）".to_string())?;
+    // NAS 処理には区切りで譲ってもらい、応答のない処理は切り離されるため通常は数秒で取得できる
+    let _operation = shared
+        .lock_nas_operation(std::time::Duration::from_secs(30))
+        .await
+        .ok_or_else(|| "転送の停止待ちがタイムアウトしました。NAS の応答を確認して再実行してください（操作は確定していません）".to_string())?;
     if action == backup_ipc::NasFileAction::DeleteLocal {
         let _session_operation = shared.media_session_operation.lock().await;
         if shared
@@ -483,14 +486,12 @@ async fn discard_session(shared: &Arc<Shared>, session_id: String) -> Result<Res
         .paused
         .store(true, std::sync::atomic::Ordering::SeqCst);
     shared.nas_wakeup.notify_one();
-    let _operation = match tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        shared.nas_operation.lock(),
-    )
-    .await
+    let _operation = match shared
+        .lock_nas_operation(std::time::Duration::from_secs(30))
+        .await
     {
-        Ok(operation) => operation,
-        Err(_) => {
+        Some(operation) => operation,
+        None => {
             if !was_paused {
                 shared
                     .paused

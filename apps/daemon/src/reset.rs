@@ -75,11 +75,10 @@ pub async fn execute(shared: &Arc<Shared>, token: String) -> Result<Response, St
     }
     let was_paused = shared.paused.swap(true, Ordering::SeqCst);
     shared.nas_wakeup.notify_one();
-    let operation =
-        tokio::time::timeout(Duration::from_secs(10), shared.nas_operation.lock()).await;
+    let operation = shared.lock_nas_operation(Duration::from_secs(30)).await;
     let _operation = match operation {
-        Ok(operation) => operation,
-        Err(_) => {
+        Some(operation) => operation,
+        None => {
             shared
                 .local_reset_pending
                 .store(was_pending, Ordering::SeqCst);

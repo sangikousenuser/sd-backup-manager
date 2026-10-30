@@ -6,6 +6,7 @@
 
 use crate::nas_backend;
 use crate::state::Shared;
+use crate::watchdog::{self, Watch, WatchError};
 use backup_core::manifest::{
     MANIFEST_FILE_NAME, MANIFEST_SCHEMA_VERSION, Manifest, ManifestDevice, ManifestFile,
     ManifestFileStatus, ManifestPartition, ManifestReference,
@@ -18,8 +19,14 @@ use backup_db::{SessionRow, TransferJob, now_utc, to_db_time};
 use backup_ipc::NotificationKind;
 use backup_storage::Control;
 use backup_storage::nas::{NasError, NasRoot};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// 応答がなく切り離した NAS 処理がこの数を超えたら、戻ってくるまで新しい処理を始めない
+/// （スレッドを使い切らないため）。「今すぐ再試行」では上限を一時的に広げて必ずやり直す。
+const MAX_HUNG_OPERATIONS: usize = 3;
+const MAX_HUNG_OPERATIONS_ON_RETRY: usize = 6;
 
 fn jitter() -> f64 {
     (uuid::Uuid::new_v4().as_u128() % 10_000) as f64 / 10_000.0
@@ -27,12 +34,19 @@ fn jitter() -> f64 {
 
 pub async fn run(shared: Arc<Shared>) {
     let mut conn_attempts: u32 = 0;
+    let mut last_retry_epoch = shared
+        .nas_retry_epoch
+        .load(std::sync::atomic::Ordering::SeqCst);
+    let mut finalize_errors: HashMap<String, String> = HashMap::new();
     loop {
         if shared.shutdown.is_cancelled() {
             return;
         }
         if shared.is_paused() {
-            set_status(&shared, |n| n.status_text = "一時停止中".into());
+            set_status(&shared, |n| {
+                n.status_text = "一時停止中".into();
+                n.phase_detail = None;
+            });
             if wait(&shared, Duration::from_secs(1)).await {
                 return;
             }
@@ -46,6 +60,7 @@ pub async fn run(shared: Arc<Shared>) {
                 n.connected = false;
                 n.status_text = "NAS 未設定（SSD に保持中）".into();
                 n.space = None;
+                n.phase_detail = None;
             });
             if wait(&shared, Duration::from_secs(5)).await {
                 return;
@@ -53,14 +68,60 @@ pub async fn run(shared: Arc<Shared>) {
             continue;
         }
 
-        // 接続（識別ファイル照合を含む）
-        let nas = match nas_backend::connect(&shared, &cfg, true).await {
-            Ok(n) => {
+        // 「今すぐ再試行」が押されたら接続の待ち時間（バックオフ）を捨てて即やり直す
+        let epoch = shared
+            .nas_retry_epoch
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let retry_requested = epoch != last_retry_epoch;
+        if retry_requested {
+            last_retry_epoch = epoch;
+            conn_attempts = 0;
+            finalize_errors.clear();
+        }
+
+        // 応答のない処理が戻ってこないまま増えすぎたら、新しい処理を始めずに待つ
+        let hung = watchdog::hung_operations(&shared);
+        let limit = if retry_requested {
+            MAX_HUNG_OPERATIONS_ON_RETRY
+        } else {
+            MAX_HUNG_OPERATIONS
+        };
+        if hung >= limit {
+            set_status(&shared, |s| {
+                s.connected = false;
+                s.status_text = "NAS が応答しません（SSD に保持中・自動で再試行します）".into();
+                s.phase_detail = Some(format!(
+                    "応答のない NAS 処理 {hung} 件の終了を待っています。NAS とネットワークを確認してください"
+                ));
+            });
+            if wait(&shared, Duration::from_secs(10)).await {
+                return;
+            }
+            continue;
+        }
+
+        // 接続（識別ファイル照合を含む）。NAS が固まっても戻ってこられるよう無応答検知付きで行う
+        let connected = {
+            let s2 = shared.clone();
+            let cfg2 = cfg.clone();
+            let handle = tokio::runtime::Handle::current();
+            watchdog::run_watched(&shared, move |w| {
+                w.tick();
+                let r = handle.block_on(nas_backend::connect(&s2, &cfg2, true));
+                w.tick();
+                r.map(|n| {
+                    let space = n.space();
+                    (n, space)
+                })
+            })
+            .await
+        };
+        let failure = match connected {
+            Ok(Ok((nas, space))) => {
                 if conn_attempts > 0 {
                     shared.event(None, "info", "nas_connected", "NAS に接続しました");
                 }
                 conn_attempts = 0;
-                let space = n.space();
                 set_status(&shared, |s| {
                     s.connected = true;
                     s.status_text = "接続中".into();
@@ -70,9 +131,14 @@ pub async fn run(shared: Arc<Shared>) {
                     s.needs_attention = false;
                     s.last_error = None;
                 });
-                n
+                Ok(nas)
             }
-            Err(e) => {
+            Ok(Err(e)) => Err((e.to_string(), e.needs_attention())),
+            Err(e) => Err((e.to_string(), false)),
+        };
+        let nas = match failure {
+            Ok(nas) => nas,
+            Err((message, needs_attention)) => {
                 conn_attempts = conn_attempts.saturating_add(1);
                 let delay = backoff_delay(
                     conn_attempts,
@@ -87,17 +153,18 @@ pub async fn run(shared: Arc<Shared>) {
                         None,
                         "warn",
                         "nas_offline",
-                        &format!("NAS に接続できません: {e}"),
+                        &format!("NAS に接続できません: {message}"),
                     );
                 }
                 set_status(&shared, |s| {
                     s.connected = false;
-                    s.status_text = "NAS 転送待機／SSD 保持中".into();
+                    s.status_text = "NAS 転送待機／SSD 保持中（自動で再試行します）".into();
                     s.space = None;
                     s.attempts = conn_attempts;
                     s.next_retry_utc = Some(to_db_time(next));
-                    s.last_error = Some(e.to_string());
-                    s.needs_attention = e.needs_attention();
+                    s.last_error = Some(message);
+                    s.needs_attention = needs_attention;
+                    s.phase_detail = None;
                 });
                 if wait(&shared, delay).await {
                     return;
@@ -111,6 +178,9 @@ pub async fn run(shared: Arc<Shared>) {
         if shared.is_paused() || shared.shutdown.is_cancelled() {
             continue;
         }
+        // 転送を実行していないこの時点で、キューの食い違いを直す（取りこぼしで止まらないように）
+        repair_queue(&shared);
+
         // 転送
         let job = shared.db().next_due_transfer(&now_utc());
         match job {
@@ -123,13 +193,60 @@ pub async fn run(shared: Arc<Shared>) {
         }
 
         // 転送待ちがなければセッションの完了処理
-        if let Err(e) = finalize_sessions(&shared, &nas, &cfg).await {
-            tracing::error!("session finalization failed: {e:#}");
-        }
+        finalize_sessions(&shared, &nas, &cfg, &mut finalize_errors).await;
+        set_status(&shared, |s| {
+            s.phase_detail = None;
+            s.current_file = None;
+            s.current_done = 0;
+            s.current_total = 0;
+        });
         drop(operation);
         if wait(&shared, Duration::from_secs(3)).await {
             return;
         }
+    }
+}
+
+/// 転送キューの自己修復（直した内容は履歴に残す）。
+fn repair_queue(shared: &Shared) {
+    // DB のロックは結果を受け取った時点で離す（履歴の書き込みで同じロックを取るため）
+    let result = shared.db().repair_nas_queue();
+    match result {
+        Ok(r) if r.total() > 0 => {
+            let mut parts = Vec::new();
+            if r.stale_uploads > 0 {
+                parts.push(format!("中断された転送 {} 件を再開", r.stale_uploads));
+            }
+            if r.missing_transfers > 0 {
+                parts.push(format!(
+                    "転送待ちから漏れていた {} 件を再登録",
+                    r.missing_transfers
+                ));
+            }
+            if r.done_unverified > 0 {
+                parts.push(format!(
+                    "NAS 検証の記録がない {} 件を再送",
+                    r.done_unverified
+                ));
+            }
+            if r.state_mismatches > 0 {
+                parts.push(format!("状態の食い違い {} 件を修正", r.state_mismatches));
+            }
+            if r.sessions_needing_attention > 0 {
+                parts.push(format!(
+                    "SSD への取り込みが終わっていない {} セッションを「要対応」に変更",
+                    r.sessions_needing_attention
+                ));
+            }
+            shared.event(
+                None,
+                "warn",
+                "nas_queue_repaired",
+                &format!("NAS 転送キューを修復しました: {}", parts.join("、")),
+            );
+        }
+        Ok(_) => {}
+        Err(e) => tracing::error!("queue repair failed: {e}"),
     }
 }
 
@@ -152,26 +269,21 @@ async fn transfer_one(
     cfg: &backup_config::Config,
     job: TransferJob,
 ) {
+    // どの失敗経路でもジョブを必ず後回しにし、同じファイルがキューの先頭を塞がないようにする
     let local = match shared
         .staging
         .final_path(&job.session_id, &job.destination_rel_path)
     {
         Ok(p) => p,
         Err(e) => {
-            tracing::error!("invalid staging path: {e}");
+            retry_later(shared, cfg, &job, &NasError::InvalidPath(e.to_string()));
             return;
         }
     };
-    // NAS 空き容量（取得できる場合のみ事前確認）
-    if let Some(space) = nas.space()
-        && space.free_bytes < job.size_bytes.saturating_add(1_000_000_000)
-    {
-        retry_later(shared, cfg, &job, &NasError::NoSpace);
-        return;
-    }
     let temp_note = format!("{}/{}", job.folder_name, job.destination_rel_path);
     if let Err(e) = shared.db().transfer_started(&job, &temp_note) {
         tracing::error!("db: {e}");
+        retry_later(shared, cfg, &job, &NasError::Io(e.to_string()));
         return;
     }
     set_status(shared, |s| {
@@ -179,6 +291,7 @@ async fn transfer_one(
         s.current_done = 0;
         s.current_total = job.size_bytes;
         s.status_text = "転送中".into();
+        s.phase_detail = None;
         if s.rate.is_none() {
             s.rate = Some(RateEstimator::new(Duration::from_secs(15)));
         }
@@ -188,7 +301,18 @@ async fn transfer_one(
         let shared2 = shared.clone();
         let nas2 = nas.clone();
         let job2 = job.clone();
-        tokio::task::spawn_blocking(move || {
+        watchdog::run_watched(shared, move |w: Arc<Watch>| {
+            w.tick();
+            // NAS 空き容量（取得できる場合のみ事前確認）。statvfs も固まり得るので監視下で行う
+            if let Some(space) = nas2.space()
+                && space.free_bytes < job2.size_bytes.saturating_add(1_000_000_000)
+            {
+                return Err(NasError::NoSpace);
+            }
+            w.tick();
+            if simulate_hang(&shared2, &job2.destination_rel_path) {
+                return Err(NasError::Offline("応答なし（試験用の模擬）".into()));
+            }
             let mut done = 0u64;
             nas2.upload_verified(
                 &local,
@@ -196,9 +320,12 @@ async fn transfer_one(
                 &job2.destination_rel_path,
                 &job2.blake3_hash,
                 &mut |n| {
+                    w.tick();
                     done += n;
-                    if shared2.shutdown.is_cancelled()
+                    if w.should_abort()
+                        || shared2.shutdown.is_cancelled()
                         || shared2.is_paused()
+                        || shared2.nas_op_waiting()
                         || shared2
                             .nas_cancel_files
                             .lock()
@@ -231,13 +358,14 @@ async fn transfer_one(
             let _ = shared.db().transfer_verifying(&job);
             if let Err(e) = shared.db().transfer_verified(&job, nas.display_uri()) {
                 tracing::error!("db: {e}");
+                retry_later(shared, cfg, &job, &NasError::Io(e.to_string()));
                 return;
             }
             tracing::debug!(?outcome, file = job.destination_rel_path, "NAS verified");
             update_session_nas_state(shared, &job.session_id);
         }
         Ok(Err(NasError::Aborted)) => {
-            // 一時停止・停止による中断は失敗に数えない
+            // 一時停止・停止・ユーザー操作・再試行要求による中断は失敗に数えない
             let _ = shared.db().requeue_file_transfer(&job.file_id, "中断");
         }
         Ok(Err(e @ (NasError::StagingCorrupt { .. } | NasError::StagingMissing(_)))) => {
@@ -250,8 +378,46 @@ async fn transfer_one(
             mark_needs_attention(shared, &job.session_id);
         }
         Ok(Err(e)) => retry_later(shared, cfg, &job, &e),
-        Err(join) => retry_later(shared, cfg, &job, &NasError::Io(join.to_string())),
+        Err(WatchError::Stalled(secs)) => {
+            shared.event(
+                Some(&job.session_id),
+                "warn",
+                "nas_stalled",
+                &format!(
+                    "{} の転送中に NAS が {secs} 秒応答しなくなったため、切り離して後で再試行します（SSD のコピーは保持）",
+                    job.destination_rel_path
+                ),
+            );
+            retry_later(
+                shared,
+                cfg,
+                &job,
+                &NasError::Offline(format!("NAS が {secs} 秒応答しません")),
+            );
+        }
+        Err(e @ WatchError::Panicked(_)) => {
+            retry_later(shared, cfg, &job, &NasError::Io(e.to_string()))
+        }
     }
+}
+
+/// 試験用: 指定パスの初回転送を、進捗を一切返さないまま固める（SMB 切断時のブロックを模擬）。
+fn simulate_hang(shared: &Shared, dest: &str) -> bool {
+    let Some(pattern) = shared.overrides.nas_hang_once.as_deref() else {
+        return false;
+    };
+    if !dest.contains(pattern)
+        || shared
+            .nas_hang_fired
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
+        return false;
+    }
+    let until = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < until && !shared.shutdown.is_cancelled() {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    true
 }
 
 fn retry_later(shared: &Shared, cfg: &backup_config::Config, job: &TransferJob, e: &NasError) {
@@ -316,30 +482,95 @@ fn update_session_nas_state(shared: &Shared, session_id: &str) {
 }
 
 /// NAS 待ちのセッションを確認し、条件が揃えばマニフェスト確定 → SSD 削除まで進める。
+/// 各セッションの処理は無応答検知付きで行い、ユーザー操作を待たせない（区切りで譲る）。
 async fn finalize_sessions(
     shared: &Arc<Shared>,
     nas: &NasRoot,
     cfg: &backup_config::Config,
-) -> anyhow::Result<()> {
+    errors: &mut HashMap<String, String>,
+) {
     let sessions = shared.db().sessions_in_states(&[
         SessionState::NasPending,
         SessionState::NasVerified,
         SessionState::StagingCleanup,
-    ])?;
-    for s in sessions {
-        if shared.shutdown.is_cancelled() || shared.is_paused() {
-            return Ok(());
+    ]);
+    let sessions = match sessions {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("session query failed: {e}");
+            return;
         }
-        if let Err(e) = finalize_session(shared, nas, cfg, &s).await {
-            shared.event(
-                Some(&s.session_id),
-                "warn",
-                "finalize_deferred",
-                &format!("完了処理を保留しました: {e:#}"),
-            );
+    };
+    for s in sessions {
+        if shared.shutdown.is_cancelled() || shared.is_paused() || shared.nas_op_waiting() {
+            return;
+        }
+        let sid = s.session_id.clone();
+        let folder = s.folder_name.clone();
+        let result = {
+            let shared2 = shared.clone();
+            let nas2 = nas.clone();
+            let cfg2 = cfg.clone();
+            let handle = tokio::runtime::Handle::current();
+            watchdog::run_watched(shared, move |w| {
+                handle.block_on(finalize_session(&shared2, &nas2, &cfg2, &s, &w))
+            })
+            .await
+        };
+        match result {
+            Ok(Ok(())) => {
+                errors.remove(&sid);
+            }
+            Ok(Err(e)) if is_aborted(&e) => {}
+            Ok(Err(e)) => {
+                // 同じ理由を何度も履歴に書かない（3 秒ごとに再試行するため）
+                let msg = format!("{e:#}");
+                if errors.get(&sid) != Some(&msg) {
+                    shared.event(
+                        Some(&sid),
+                        "warn",
+                        "finalize_deferred",
+                        &format!("{folder} の完了処理を保留しました（自動で再試行します）: {msg}"),
+                    );
+                    errors.insert(sid, msg);
+                }
+            }
+            Err(WatchError::Stalled(secs)) => {
+                shared.event(
+                    Some(&sid),
+                    "warn",
+                    "nas_stalled",
+                    &format!(
+                        "{folder} の完了処理中に NAS が {secs} 秒応答しなくなったため、切り離して後で再試行します（SSD のデータは保持）"
+                    ),
+                );
+                set_status(shared, |n| {
+                    n.connected = false;
+                    n.last_error = Some(format!("NAS が {secs} 秒応答しません"));
+                });
+                return;
+            }
+            Err(e) => tracing::error!("finalize task failed: {e}"),
         }
     }
-    Ok(())
+}
+
+/// 中断（再試行・ユーザー操作・一時停止）による終了か。
+fn is_aborted(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<NasError>()
+        .is_some_and(|n| matches!(n, NasError::Aborted))
+}
+
+fn check_abort(shared: &Shared, w: &Watch) -> Result<(), NasError> {
+    if w.should_abort()
+        || shared.nas_op_waiting()
+        || shared.is_paused()
+        || shared.shutdown.is_cancelled()
+    {
+        Err(NasError::Aborted)
+    } else {
+        Ok(())
+    }
 }
 
 async fn finalize_session(
@@ -347,21 +578,27 @@ async fn finalize_session(
     nas: &NasRoot,
     cfg: &backup_config::Config,
     s: &SessionRow,
+    w: &Arc<Watch>,
 ) -> anyhow::Result<()> {
     let sid = &s.session_id;
+    w.tick();
     let files = shared.db().files_for_session(sid)?;
     let pending = shared.db().pending_transfer_count(sid)?;
     if backup_core::session::is_card_folder(&s.folder_name) {
         let partitions = shared.db().partition_details(&s.device_id)?;
         if partitions.len() > 1 {
             for p in partitions {
+                check_abort(shared, w)?;
                 nas.ensure_directory(&s.folder_name, &backup_core::partition_label(p.0))?;
+                w.tick();
             }
         }
     }
     // 再起動後の完了処理でも空フォルダを含めて存在を確認する。
     for (_, _, dest) in shared.db().directories(sid)? {
+        check_abort(shared, w)?;
         nas.ensure_directory(&s.folder_name, &dest)?;
+        w.tick();
     }
 
     if s.state == SessionState::NasPending {
@@ -378,6 +615,12 @@ async fn finalize_session(
         }
 
         // manifest.json を作成 → SSD に確定 → NAS へ転送・検証
+        set_status(shared, |n| {
+            n.phase_detail = Some(format!(
+                "{}: manifest.json を NAS に保存・検証中",
+                s.folder_name
+            ));
+        });
         let manifest = build_manifest(shared, s, &files)?;
         let bytes = manifest.to_json_pretty();
         let local = shared.staging.manifest_path(sid)?;
@@ -387,16 +630,19 @@ async fn finalize_session(
         let folder = s.folder_name.clone();
         let local2 = local.clone();
         let h2 = hash.clone();
+        let w2 = w.clone();
         tokio::task::spawn_blocking(move || {
-            nas2.upload_verified(
-                &local2,
-                &folder,
-                MANIFEST_FILE_NAME,
-                &h2,
-                &mut backup_storage::no_progress(),
-            )
+            nas2.upload_verified(&local2, &folder, MANIFEST_FILE_NAME, &h2, &mut |_| {
+                w2.tick();
+                if w2.should_abort() {
+                    Control::Abort
+                } else {
+                    Control::Continue
+                }
+            })
         })
         .await??;
+        w.tick();
         {
             let db = shared.db();
             db.mark_manifest_verified(sid, true)?;
@@ -419,10 +665,21 @@ async fn finalize_session(
         // 削除前の最終確認: NAS 上の全実体（参照含む）を再検証
         let files = shared.db().files_for_session(sid)?;
         let mut bad = Vec::new();
-        for f in &files {
-            if shared.shutdown.is_cancelled() {
-                return Ok(());
-            }
+        let total = files.len();
+        for (i, f) in files.iter().enumerate() {
+            // ユーザー操作・再試行・停止を待たせない。最終確認は次回また最初から行う（安全側）
+            check_abort(shared, w)?;
+            set_status(shared, |n| {
+                n.phase_detail = Some(format!(
+                    "{}: SSD 削除前の最終確認（NAS 上のファイルを読み直して照合）{}/{} 件",
+                    s.folder_name,
+                    i + 1,
+                    total
+                ));
+                n.current_file = Some(f.destination_rel_path.clone());
+                n.current_done = 0;
+                n.current_total = f.size_bytes;
+            });
             let Some(hash) = f.blake3_hash.clone() else {
                 bad.push((f.file_id.clone(), false));
                 continue;
@@ -441,9 +698,22 @@ async fn finalize_session(
             };
             let nas2 = nas.clone();
             let full = cfg.nas.final_rehash_before_cleanup;
+            let w2 = w.clone();
+            let shared2 = shared.clone();
             let ok = tokio::task::spawn_blocking(move || -> Result<bool, NasError> {
+                w2.tick();
                 if full {
-                    nas2.verify_existing(&folder, &rel, &hash, &mut backup_storage::no_progress())
+                    let mut done = 0u64;
+                    nas2.verify_existing(&folder, &rel, &hash, &mut |n| {
+                        w2.tick();
+                        done += n;
+                        shared2.rt().nas.current_done = done;
+                        if check_abort(&shared2, &w2).is_err() {
+                            Control::Abort
+                        } else {
+                            Control::Continue
+                        }
+                    })
                 } else {
                     let p = nas2.root().join(&folder).join(&rel);
                     Ok(p.is_file())
@@ -516,6 +786,14 @@ async fn finalize_session(
         if let Err(violations) = check_staging_deletion(&input) {
             anyhow::bail!("削除条件を満たしていません: {violations:?}");
         }
+        set_status(shared, |n| {
+            n.phase_detail = Some(format!(
+                "{}: NAS で全件確認済み。SSD の一時データを削除中",
+                s.folder_name
+            ));
+            n.current_file = None;
+        });
+        w.tick();
         let staging = shared.staging.clone();
         let sid2 = sid.clone();
         tokio::task::spawn_blocking(move || staging.remove_session(&sid2)).await??;
@@ -636,8 +914,13 @@ pub fn build_manifest(
     })
 }
 
-/// 「今すぐ再試行」。
+/// 「今すぐ再試行」。待ち時間（バックオフ）中の転送・接続をすぐやり直し、応答のない NAS 処理は
+/// 切り離して新しく始め直す。キューの食い違いもその場で修復する。
+/// ユーザーが個別に「中止」したファイルは対象外（ファイルごとの操作で再開する）。
 pub fn retry_now(shared: &Shared) -> usize {
+    shared
+        .nas_retry_epoch
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let n = shared.db().retry_all_transfers_now().unwrap_or(0);
     shared.nas_wakeup.notify_one();
     n

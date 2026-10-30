@@ -22,6 +22,7 @@ backup-ipc.workspace = true
 backup-config.workspace = true
 backup-device.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

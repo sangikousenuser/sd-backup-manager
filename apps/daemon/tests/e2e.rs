@@ -598,6 +598,7 @@ async fn capacity_wait_blocks_start_and_third_media_waits() {
             Overrides {
                 nas_local_dir: None,
                 fake_ssd_free_bytes: Some(20_100_000_000),
+                ..Default::default()
             },
         ),
         token.clone(),
@@ -1550,5 +1551,166 @@ async fn selected_local_deletion_removes_only_pc_copy_and_queue_and_recovers_aft
             .exists()
     );
     assert_eq!(session_state(&shared, &sid), SessionState::NeedsAttention);
+    shutdown(shared, token).await;
+}
+
+fn has_event(shared: &Shared, event_type: &str) -> bool {
+    shared
+        .db()
+        .recent_events("2000-01-01T00:00:00.000Z", 10_000)
+        .unwrap()
+        .iter()
+        .any(|e| e.event_type == event_type)
+}
+
+/// 転送中に NAS が応答しなくなっても（SMB 切断でブロックし続ける状態）、自動で切り離して再送し、
+/// 最後まで完了する。止まったまま 0 件で放置されない。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unresponsive_nas_is_detached_and_transfer_still_completes() {
+    let e = env();
+    let token = CancellationToken::new();
+    let shared = start(
+        options(
+            &e,
+            Overrides {
+                nas_local_dir: Some(e.nas.clone()),
+                nas_stall_timeout: Some(Duration::from_secs(2)),
+                nas_hang_once: Some("C0001.MP4".into()),
+                ..Default::default()
+            },
+        ),
+        token.clone(),
+    )
+    .await
+    .unwrap();
+    make_card(&e.media, "hang");
+    wait_until("green", Duration::from_secs(20), || {
+        slot_phase(&shared, 0) == Some(SlotPhase::DoneGreen)
+    })
+    .await;
+    let sid = session_of_slot(&shared, 0).unwrap();
+    // 固まった転送が検知・切り離されたこと
+    wait_until("stall detected", Duration::from_secs(20), || {
+        has_event(&shared, "nas_stalled")
+    })
+    .await;
+    // 自動再試行（バックオフ後）で最後まで完了する
+    wait_until("complete after stall", Duration::from_secs(60), || {
+        session_state(&shared, &sid) == SessionState::Complete
+    })
+    .await;
+    let s = shared.db().get_session(&sid).unwrap().unwrap();
+    assert_eq!(s.failed_files, 0);
+    assert!(
+        find_files(&e.nas.join(&s.folder_name))
+            .iter()
+            .any(|f| f.ends_with("C0001.MP4"))
+    );
+    shutdown(shared, token).await;
+}
+
+/// NAS が応答しない間でも「今すぐ再試行」がすぐ効き、ユーザーのファイル操作のロックも数秒で取れる。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retry_and_user_actions_work_while_nas_is_unresponsive() {
+    let e = env();
+    let token = CancellationToken::new();
+    let shared = start(
+        options(
+            &e,
+            Overrides {
+                nas_local_dir: Some(e.nas.clone()),
+                // 自動検知には任せず（10 分）、再試行・操作要求で切り離されることを確かめる
+                nas_stall_timeout: Some(Duration::from_secs(600)),
+                nas_hang_once: Some("C0001.MP4".into()),
+                ..Default::default()
+            },
+        ),
+        token.clone(),
+    )
+    .await
+    .unwrap();
+    make_card(&e.media, "retry");
+    wait_until("green", Duration::from_secs(20), || {
+        slot_phase(&shared, 0) == Some(SlotPhase::DoneGreen)
+    })
+    .await;
+    let sid = session_of_slot(&shared, 0).unwrap();
+    // 固まっている（進捗が止まっている）ことを確認
+    wait_until("stalled", Duration::from_secs(20), || {
+        shared.rt().nas.stalled_secs.is_some()
+            || shared
+                .rt()
+                .nas
+                .current_file
+                .as_deref()
+                .is_some_and(|f| f.ends_with("C0001.MP4"))
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(4)).await;
+
+    // ユーザー操作は 30 秒以内（実際は数秒）に NAS 処理の排他を取れる
+    let started = Instant::now();
+    let guard = shared
+        .lock_nas_operation(Duration::from_secs(30))
+        .await
+        .expect("user action must not be blocked by an unresponsive NAS");
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
+    );
+    drop(guard);
+
+    // 「今すぐ再試行」で待ち時間を飛ばしてやり直し、完了する
+    sd_backup_daemon::nas_worker::retry_now(&shared);
+    wait_until("complete after retry", Duration::from_secs(40), || {
+        session_state(&shared, &sid) == SessionState::Complete
+    })
+    .await;
+    shutdown(shared, token).await;
+}
+
+/// 「転送中」のまま取り残されたレコード（ワーカーが戻ってこなかった等）があっても、
+/// 自己修復で再開し、0 件のまま止まらずに完了する。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stale_upload_records_are_repaired_instead_of_stalling_at_zero() {
+    let e = env();
+    let nas = e.base.join("nas-later"); // 最初は NAS に接続できない
+    let token = CancellationToken::new();
+    let shared = start(
+        options(
+            &e,
+            Overrides {
+                nas_local_dir: Some(nas.clone()),
+                ..Default::default()
+            },
+        ),
+        token.clone(),
+    )
+    .await
+    .unwrap();
+    make_card(&e.media, "stale");
+    wait_until("green", Duration::from_secs(20), || {
+        slot_phase(&shared, 0) == Some(SlotPhase::DoneGreen)
+    })
+    .await;
+    let sid = session_of_slot(&shared, 0).unwrap();
+    // NAS オフライン中に、転送中のまま中断された状態を作る（以前は二度と取り出されなかった）
+    {
+        let db = shared.db();
+        let job = db
+            .next_due_transfer(&backup_db::now_utc())
+            .unwrap()
+            .expect("queued transfer");
+        db.transfer_started(&job, "stale").unwrap();
+        assert_eq!(db.nas_queue_stats().unwrap().uploading_files, 1);
+    }
+    fs::create_dir_all(&nas).unwrap();
+    sd_backup_daemon::nas_worker::retry_now(&shared);
+    wait_until("complete after repair", Duration::from_secs(40), || {
+        session_state(&shared, &sid) == SessionState::Complete
+    })
+    .await;
+    assert!(has_event(&shared, "nas_queue_repaired"));
     shutdown(shared, token).await;
 }

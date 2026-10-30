@@ -202,12 +202,36 @@ fn nas_card(snap: &backup_ipc::Snapshot) -> Element<'_, Message> {
             .girth(10)
             .style(theme::bar(color)),
     );
-    let current = n
-        .current_file
-        .clone()
-        .map(|f| format!("転送中: {f}"))
-        .unwrap_or_else(|| "転送中のファイルなし".into());
+    // 転送中のファイル、または転送以外の処理（最終確認など）を必ず表示し、止まって見えないようにする
+    let current = match (&n.phase_detail, &n.current_file) {
+        (Some(phase), Some(f)) => format!("{phase}: {f}"),
+        (Some(phase), None) => phase.clone(),
+        (None, Some(f)) => format!("転送中: {f}"),
+        (None, None) => "転送中のファイルなし".into(),
+    };
     col = col.push(text(current).size(13));
+    if let Some(secs) = n.stalled_secs {
+        col = col.push(
+            text(format!(
+                "▲ NAS が {secs} 秒応答していません。しばらく応答がなければ自動で切り離して再試行します（「今すぐ再試行」ですぐやり直せます）"
+            ))
+            .size(13)
+            .color(theme::YELLOW),
+        );
+    }
+    if n.hung_operations > 0 {
+        col = col.push(
+            text(format!(
+                "▲ 応答のない NAS 処理 {} 件を切り離しました（SSD のコピーは保持。NAS 復旧後に自動で再送します）",
+                n.hung_operations
+            ))
+            .size(13)
+            .color(theme::YELLOW),
+        );
+    }
+    if let Some(reason) = &n.waiting_reason {
+        col = col.push(text(reason.clone()).size(13).color(theme::BLUE));
+    }
     col = col.push(text(format!(
         "{} | 残り {} 件 / {}（再試行待ち {} 件）| NAS 処理待ちセッション {} 件",
         rate_text(n.rate_bytes_per_sec),

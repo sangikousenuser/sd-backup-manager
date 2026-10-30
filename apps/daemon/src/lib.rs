@@ -11,6 +11,7 @@ pub mod scanner;
 pub mod snapshot;
 pub mod state;
 pub mod telemetry;
+pub mod watchdog;
 
 use anyhow::Context;
 use backup_config::{AppPaths, Config, load_formats};

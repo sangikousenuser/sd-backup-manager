@@ -264,6 +264,18 @@ pub struct WaitingView {
 pub struct NasView {
     #[serde(default)]
     pub cancelled_files: u64,
+    /// 転送以外に行っている処理（最終確認・マニフェスト保存・SSD 削除・応答待ちなど）
+    #[serde(default)]
+    pub phase_detail: Option<String>,
+    /// 現在の NAS 処理が進捗していない秒数（10 秒以上のとき）
+    #[serde(default)]
+    pub stalled_secs: Option<u64>,
+    /// 応答がなく切り離した NAS 処理の数（OS 側で戻るのを待っている）
+    #[serde(default)]
+    pub hung_operations: u64,
+    /// 転送待ちが 0 件なのに完了していない理由（あれば）
+    #[serde(default)]
+    pub waiting_reason: Option<String>,
     pub configured: bool,
     pub connected: bool,
     pub target: String,
