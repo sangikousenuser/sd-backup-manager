@@ -333,6 +333,9 @@ async fn nas_offline_keeps_staging_and_reinsert_after_completion_creates_new_fol
     );
     assert!(!shared.rt().nas.connected);
     shutdown(shared, token).await;
+    // カードは抜いた状態で再起動する。挿したままだと、再起動直後に NAS 側の完了が先に済んだ場合
+    // 「完了後の再挿入」として古い内容の新セッションが作られ、後の書き換え確認と競合する
+    rename_retry(e.media.join("cardB"), e.base.join("cardB-out")).unwrap();
 
     // NAS が復帰した状態でデーモンを再起動 → 転送されて完了
     rename_retry(e.base.join("nas"), &offline_nas).unwrap();
@@ -357,12 +360,11 @@ async fn nas_offline_keeps_staging_and_reinsert_after_completion_creates_new_fol
     .await;
     let folder1 = shared.db().get_session(&sid).unwrap().unwrap().folder_name;
 
+    assert!(
+        shared.db().list_sessions(100).unwrap().len() == 1,
+        "カードを挿していない間に新しいセッションは作られない"
+    );
     // 正常終了後、同じカードに新しい撮影データを追加して再挿入（AT-11）
-    rename_retry(e.media.join("cardB"), e.base.join("cardB-out")).unwrap();
-    wait_until("slot freed", Duration::from_secs(10), || {
-        slot_phase(&shared, 0).is_none()
-    })
-    .await;
     write(
         &e.base.join("cardB-out/p1/DCIM/100MSDCF/DSC0002.JPG"),
         b"new shot",
