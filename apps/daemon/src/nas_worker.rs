@@ -18,7 +18,8 @@ use backup_core::state::{NasFileState, SessionNasState, SessionState, StageState
 use backup_db::{SessionRow, TransferJob, now_utc, to_db_time};
 use backup_ipc::NotificationKind;
 use backup_storage::Control;
-use backup_storage::nas::{NasError, NasRoot};
+use backup_storage::nas::{NasError, NasRoot, UploadPhase};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -313,15 +314,16 @@ async fn transfer_one(
             if simulate_hang(&shared2, &job2.destination_rel_path) {
                 return Err(NasError::Offline("応答なし（試験用の模擬）".into()));
             }
-            let mut done = 0u64;
-            nas2.upload_verified(
+            // 書き込み → 読み戻し照合の各段階でバーを 0 から進め、段階名を表示する（満杯のまま止まって見えないように）
+            let done = Cell::new(0u64);
+            nas2.upload_verified_phased(
                 &local,
                 &job2.folder_name,
                 &job2.destination_rel_path,
                 &job2.blake3_hash,
                 &mut |n| {
                     w.tick();
-                    done += n;
+                    done.set(done.get() + n);
                     if w.should_abort()
                         || shared2.shutdown.is_cancelled()
                         || shared2.is_paused()
@@ -335,13 +337,33 @@ async fn transfer_one(
                         return Control::Abort;
                     }
                     let mut rt = shared2.rt();
-                    rt.nas.current_done = done;
+                    rt.nas.current_done = done.get();
+                    // 速度表示は NAS との実際の入出力量（読み戻しを含む）
                     rt.nas.cumulative_bytes += n;
                     let total = rt.nas.cumulative_bytes;
                     if let Some(r) = rt.nas.rate.as_mut() {
                         r.record(Instant::now(), total);
                     }
                     Control::Continue
+                },
+                &mut |phase| {
+                    w.set_slow_step(phase == UploadPhase::Flushing);
+                    if matches!(
+                        phase,
+                        UploadPhase::CheckingExisting | UploadPhase::ReadingBack
+                    ) {
+                        done.set(0);
+                    }
+                    let mut rt = shared2.rt();
+                    rt.nas.phase_detail = upload_phase_text(phase).map(str::to_string);
+                    if matches!(
+                        phase,
+                        UploadPhase::CheckingExisting
+                            | UploadPhase::ReadingBack
+                            | UploadPhase::Writing
+                    ) {
+                        rt.nas.current_done = 0;
+                    }
                 },
             )
         })
@@ -398,6 +420,17 @@ async fn transfer_one(
         Err(e @ WatchError::Panicked(_)) => {
             retry_later(shared, cfg, &job, &NasError::Io(e.to_string()))
         }
+    }
+}
+
+/// 転送の段階ごとの表示。書き込み中は既定の「転送中」表示にする。
+fn upload_phase_text(phase: UploadPhase) -> Option<&'static str> {
+    match phase {
+        UploadPhase::CheckingExisting => Some("NAS 上の既存ファイルを照合中"),
+        UploadPhase::Writing => None,
+        UploadPhase::Flushing => Some("書き込み完了・NAS 側でディスクへの確定待ち"),
+        UploadPhase::ReadingBack => Some("NAS から読み戻して照合中"),
+        UploadPhase::Finalizing => Some("NAS 上で名前を確定中"),
     }
 }
 

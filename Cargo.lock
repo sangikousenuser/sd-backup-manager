@@ -333,7 +333,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "backup-config"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "backup-core",
  "keyring",
@@ -346,7 +346,7 @@ dependencies = [
 
 [[package]]
 name = "backup-core"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "blake3",
  "chrono",
@@ -362,7 +362,7 @@ dependencies = [
 
 [[package]]
 name = "backup-db"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "backup-core",
  "chrono",
@@ -376,7 +376,7 @@ dependencies = [
 
 [[package]]
 name = "backup-device"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "backup-core",
  "serde",
@@ -391,7 +391,7 @@ dependencies = [
 
 [[package]]
 name = "backup-ipc"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "backup-core",
  "nix",
@@ -405,7 +405,7 @@ dependencies = [
 
 [[package]]
 name = "backup-storage"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "backup-core",
  "blake3",
@@ -3167,7 +3167,7 @@ dependencies = [
 
 [[package]]
 name = "sd-backup-cli"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "anyhow",
  "backup-config",
@@ -3182,7 +3182,7 @@ dependencies = [
 
 [[package]]
 name = "sd-backup-daemon"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "anyhow",
  "backup-config",
@@ -3211,7 +3211,7 @@ dependencies = [
 
 [[package]]
 name = "sd-backup-gui"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "backup-config",
  "backup-core",

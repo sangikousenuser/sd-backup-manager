@@ -42,8 +42,8 @@ GUI に PC 内の保存先表示・開くボタンを追加。シミュレータ
 
 | 項目 | 状態 |
 |---|---|
-| Linux（Ubuntu 26.04）版 | v0.4.3 を配布（.deb / tar.gz / install.sh）。実機にインストールしてデーモン起動と `doctor` を確認したのは v0.1.0。SD カード・NAS での実機受け入れ試験は未実施 |
-| Windows 版 | v0.4.3 を正式 Release で配布（Setup.exe・zip）。GitHub Actions の windows-latest で clippy・単体テスト・E2E（シミュレータ）・Setup.exe 作成まで確認。**Windows 実機での動作確認は未実施** |
+| Linux（Ubuntu 26.04）版 | v0.4.4 を配布（.deb / tar.gz / install.sh）。実機にインストールしてデーモン起動と `doctor` を確認したのは v0.1.0。SD カード・NAS での実機受け入れ試験は未実施 |
+| Windows 版 | v0.4.4 を正式 Release で配布（Setup.exe・zip）。GitHub Actions の windows-latest で clippy・単体テスト・E2E（シミュレータ）・Setup.exe 作成まで確認。**Windows 実機での動作確認は未実施** |
 | macOS | 開発用。シミュレータでのみ動作（実機メディアは扱わない） |
 | CI | `.github/workflows/ci.yml`: fmt / clippy + test（Linux・macOS・Windows）/ cargo audit / Ubuntu 26.04 コンテナでのリリースビルド / Windows リリースビルド（zip + Setup.exe） |
 | リリース | `v*` タグの push で `.github/workflows/release.yml` が Linux（.deb, tar.gz）と Windows（Setup.exe, zip）を GitHub Releases に公開 |
@@ -223,3 +223,4 @@ CI（windows-latest）で確認できるのは、コンパイル・clippy・単�
 | 2026-10-29 | v0.4.0 を正式 Release で配布（NAS 転送のファイル別再試行・中止・PC コピーと転送キューの削除）。CI 成果物のみの配布から、通常の最新版ダウンロードを更新 |
 | 2026-10-29 | v0.4.1 の NAS 初回設定修正、v0.4.2 の設定からの PC 内データ一括削除を正式公開。全 OS の CI・Windows インストーラー作成が成功。macOS で一括削除の確認画面・入力・キャンセルを目視確認 |
 | 2026-10-31 | v0.4.3: NAS 転送のウォッチドッグ・キューの自己修復・再試行の強化。無応答で 0 件のまま止まる問題を修正 |
+| 2026-10-31 | v0.4.4: 書き込み後の確定待ち・読み戻し照合の段階を表示（Windows 実機でバー満杯・速度「--」のまま止まって見えた報告）。フラッシュ中は無応答判定を 4 倍に延長 |

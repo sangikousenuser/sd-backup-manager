@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 const QUICK_ABANDON: Duration = Duration::from_secs(3);
 /// 中断を求めてから、処理が自分で戻るのを待つ時間。
 const COOPERATIVE_GRACE: Duration = Duration::from_secs(5);
+/// 1 回の呼び出しが長くかかり得る段階（NAS 側のフラッシュなど）では、無応答とみなす時間をこの倍率で延ばす。
+const SLOW_STEP_FACTOR: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -32,6 +34,7 @@ pub struct Watch {
     started: Instant,
     last_tick_ms: AtomicU64,
     abort: AtomicBool,
+    slow_step: AtomicBool,
     phase: Mutex<Phase>,
     hung_counter: Arc<AtomicUsize>,
 }
@@ -42,6 +45,7 @@ impl Watch {
             started: Instant::now(),
             last_tick_ms: AtomicU64::new(0),
             abort: AtomicBool::new(false),
+            slow_step: AtomicBool::new(false),
             phase: Mutex::new(Phase::Running),
             hung_counter,
         }
@@ -51,6 +55,13 @@ impl Watch {
     pub fn tick(&self) {
         self.last_tick_ms
             .store(self.started.elapsed().as_millis() as u64, Ordering::SeqCst);
+    }
+
+    /// 途中で進捗を出せない長い 1 ステップ（フラッシュ等）の間だけ true にする。
+    /// 無応答とみなすまでの時間が延びる（再試行・ユーザー操作時の早期切り離しはそのまま）。
+    pub fn set_slow_step(&self, slow: bool) {
+        self.tick();
+        self.slow_step.store(slow, Ordering::SeqCst);
     }
 
     /// 監視側から中断が求められているか。true なら安全な区切りで処理をやめる。
@@ -95,7 +106,10 @@ pub enum WatchError {
 /// 処理を中断させる理由があるか（無応答・再試行要求・ユーザー操作待ち・一時停止・終了）。
 fn abort_reason(shared: &Shared, watch: &Watch, epoch_at_start: u64) -> Option<Duration> {
     let idle = watch.idle();
-    let stall = shared.nas_stall_timeout();
+    let mut stall = shared.nas_stall_timeout();
+    if watch.slow_step.load(Ordering::SeqCst) {
+        stall *= SLOW_STEP_FACTOR;
+    }
     let retry_requested = shared.nas_retry_epoch.load(Ordering::SeqCst) != epoch_at_start;
     let wants_lock = shared.nas_op_waiting();
     let stopping = shared.is_paused() || shared.shutdown.is_cancelled();

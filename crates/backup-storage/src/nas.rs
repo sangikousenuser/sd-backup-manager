@@ -302,6 +302,27 @@ impl NasRoot {
         expected_hash: &str,
         progress: Progress<'_>,
     ) -> Result<UploadOutcome, NasError> {
+        self.upload_verified_phased(
+            local,
+            folder,
+            dest_rel,
+            expected_hash,
+            progress,
+            &mut |_| {},
+        )
+    }
+
+    /// [`Self::upload_verified`] と同じ。段階が変わるたびに `phase` を呼ぶ（画面表示・無応答判定用）。
+    /// `progress` には各段階で処理したバイト数が渡る（書き込み・読み戻し照合とも）。
+    pub fn upload_verified_phased(
+        &self,
+        local: &Path,
+        folder: &str,
+        dest_rel: &str,
+        expected_hash: &str,
+        progress: Progress<'_>,
+        phase: &mut dyn FnMut(UploadPhase),
+    ) -> Result<UploadOutcome, NasError> {
         let final_path = self.final_path(folder, dest_rel)?;
         let parent = final_path
             .parent()
@@ -323,9 +344,13 @@ impl NasRoot {
             Err(e) => return Err(NasError::from_io(e)),
         };
         // 既存実体の照合・読み戻しの間も progress(0) を呼び、呼び出し側の無応答検知と中断に応じる
-        if existed && self.verify_existing(folder, dest_rel, expected_hash, &mut |_| progress(0))? {
-            return Ok(UploadOutcome::AlreadyPresent);
+        if existed {
+            phase(UploadPhase::CheckingExisting);
+            if self.verify_existing(folder, dest_rel, expected_hash, &mut *progress)? {
+                return Ok(UploadOutcome::AlreadyPresent);
+            }
         }
+        phase(UploadPhase::Writing);
 
         fs::create_dir_all(&parent).map_err(NasError::from_io)?;
         let temp = parent.join(format!("{TEMP_PREFIX}{}.part", uuid::Uuid::new_v4()));
@@ -358,6 +383,7 @@ impl NasRoot {
                     return Err(NasError::Aborted);
                 }
             }
+            phase(UploadPhase::Flushing);
             out.flush().map_err(NasError::from_io)?;
             out.sync_all().map_err(NasError::from_io)?;
             crate::drop_page_cache(&out);
@@ -371,7 +397,8 @@ impl NasRoot {
                 });
             }
             // 読み戻し
-            let back = hash_file(&temp, &mut |_| progress(0)).map_err(|e| {
+            phase(UploadPhase::ReadingBack);
+            let back = hash_file(&temp, &mut *progress).map_err(|e| {
                 if e.kind() == io::ErrorKind::Interrupted {
                     NasError::Aborted
                 } else {
@@ -388,6 +415,7 @@ impl NasRoot {
             return Err(e);
         }
 
+        phase(UploadPhase::Finalizing);
         // 確定: 既存（不一致）の最終名は自セッションの壊れた実体なので退避してから置換
         if existed {
             let old = parent.join(format!("{OLD_PREFIX}{}", uuid::Uuid::new_v4()));
@@ -441,6 +469,21 @@ impl NasRoot {
         }
         removed
     }
+}
+
+/// [`NasRoot::upload_verified_phased`] の段階。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadPhase {
+    /// NAS に同名の実体があり、内容を読んで照合している
+    CheckingExisting,
+    /// 一時ファイルへ書き込み中
+    Writing,
+    /// 書き込み完了。NAS 側でのディスク確定（フラッシュ）待ち
+    Flushing,
+    /// NAS から読み戻してハッシュ照合中
+    ReadingBack,
+    /// 最終名への置き換え・サイズ確認
+    Finalizing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -525,6 +568,51 @@ mod tests {
             .unwrap();
         assert_eq!(again, UploadOutcome::AlreadyPresent);
         assert_eq!(nas.cleanup_temp_files(FOLDER), 0);
+    }
+
+    #[test]
+    fn upload_reports_phases_and_read_back_bytes() {
+        let (_d, nas, local, hash) = setup();
+        let size = fs::metadata(&local).unwrap().len();
+        let mut phases = Vec::new();
+        let mut bytes = Vec::new();
+        {
+            let phases_cell = std::cell::RefCell::new(&mut phases);
+            nas.upload_verified_phased(
+                &local,
+                FOLDER,
+                "a.bin",
+                &hash,
+                &mut |n| {
+                    bytes.push((*phases_cell.borrow().last().unwrap(), n));
+                    Control::Continue
+                },
+                &mut |p| phases_cell.borrow_mut().push(p),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            phases,
+            [
+                UploadPhase::Writing,
+                UploadPhase::Flushing,
+                UploadPhase::ReadingBack,
+                UploadPhase::Finalizing
+            ]
+        );
+        let sum = |p| {
+            bytes
+                .iter()
+                .filter(|(q, _)| *q == p)
+                .map(|(_, n)| n)
+                .sum::<u64>()
+        };
+        assert_eq!(sum(UploadPhase::Writing), size);
+        assert_eq!(
+            sum(UploadPhase::ReadingBack),
+            size,
+            "読み戻し量も進捗に出る"
+        );
     }
 
     #[test]
